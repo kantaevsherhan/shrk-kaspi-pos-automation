@@ -1,30 +1,7 @@
-# Security Policy
+# Безопасность
 
-## Reporting a Vulnerability
+Сервис использует приватные интерфейсы Kaspi Pay. Размещайте его за HTTPS-прокси. Все `/api/*` защищены Bearer-ключами из `SERVICE_API_KEYS`; каждому подключаемому сервису задавайте отдельный случайный ключ. Все ключи имеют полный доступ к одному Kaspi-аккаунту, включая возвраты.
 
-If you discover a security vulnerability in this project, please report it responsibly.
+Сохраняйте `.env` и `STATE_DIR` вне Git. Сессия Kaspi зашифрована ключом `TOKEN_SECRET_KEY`; при утрате этого ключа понадобится повторный SMS-вход. Ограничьте доступ к вебхукам и проверяйте их HMAC-подпись по исходному телу запроса.
 
-**Do NOT open a public GitHub issue.**
-
-Instead, send an email to: **admin@everything.kz**
-
-Please include:
-
-- A description of the vulnerability.
-- Steps to reproduce the issue.
-- Any relevant logs or screenshots.
-
-We will acknowledge your report within **48 hours** and aim to provide a fix or mitigation within **7 days**.
-
-## Supported Versions
-
-| Version | Supported          |
-| ------- | ------------------ |
-| 1.x     | :white_check_mark: |
-
-## Security Best Practices
-
-- Never commit `.env`, `keypair.json`, `device.json`, or `*.bak` files.
-- Always set `TOKEN_SECRET_KEY` via environment variable — the app will refuse to start without it.
-- Rotate keys periodically using `npm run regen:keypair` and `npm run regen:device`.
-- Keep dependencies up to date (`npm audit`).
+Если обнаружена уязвимость, не публикуйте реальные ключи, OTP или данные клиента в issue. Свяжитесь с владельцем репозитория приватно.
