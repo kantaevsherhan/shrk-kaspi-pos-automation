@@ -1,38 +1,20 @@
 import { Router } from 'express';
 import { KASPI_QRPAY_URL } from '../config.js';
 import { loggedFetch, signedQrPayHeaders } from '../helpers.js';
-import { decryptSecret } from '../crypto.js';
+import { requireKaspiSession } from '../kaspiSession.js';
 import { trackPayment } from '../polling.js';
+import { recordRequest, updateOperationStatus } from '../audit.js';
 
 const router = Router();
 
-// Extract session from request headers
-const extractSession = (req) => ({
-  tokenSN: req.headers['x-token-sn'] || null,
-  profileId: req.headers['x-profile-id'] || null,
-  vtokenSecret: req.headers['x-vtoken-secret'] || null,
-});
-
-const requireAuth = (req, res, next) => {
-  const session = extractSession(req);
-  if (!session.tokenSN) return res.status(401).json({ error: 'Missing X-Token-SN header.' });
-  if (!session.vtokenSecret) return res.status(401).json({ error: 'Missing X-Vtoken-Secret header.' });
-  try {
-    session.decryptedSecret = decryptSecret(session.vtokenSecret);
-  } catch {
-    return res.status(401).json({ error: 'Invalid or expired vtokenSecret. Re-authenticate.' });
-  }
-  req.session = session;
-  next();
-};
-
-router.use(requireAuth);
+router.use(requireKaspiSession);
 
 // ─── Create QR token ───
 
 router.post('/create', async (req, res) => {
   const { amount, latitude, longitude } = req.body;
-  if (!amount) return res.status(400).json({ error: 'amount required' });
+  if (!Number.isFinite(Number(amount)) || Number(amount) <= 0)
+    return res.status(400).json({ error: 'Positive amount required' });
 
   try {
     const url = `${KASPI_QRPAY_URL}/v01/qr-token/create`;
@@ -50,14 +32,18 @@ router.post('/create', async (req, res) => {
     });
     const kaspiResponse = await resp.json();
     const d = kaspiResponse.Data;
-    if (d && d.QrOperationId) {
+    recordRequest({ serviceName: req.serviceName, kind: 'qr', operationId: d?.QrOperationId,
+      amount: Number(amount), status: d?.QrOperationId ? (d.Status || 'QrTokenCreated') : 'rejected',
+      kaspiStatusCode: kaspiResponse.StatusCode,
+      error: d?.QrOperationId ? null : kaspiResponse.Message || 'Kaspi did not create a QR token' });
+    if (d?.QrOperationId && kaspiResponse.StatusCode === 0) {
       const opts = d.QrPaymentBehaviorOptions || {};
       trackPayment(
         d.QrOperationId,
         'qr',
         {
           tokenSN: req.session.tokenSN,
-          vtokenSecret: req.headers['x-vtoken-secret'],
+          vtokenSecret: req.session.vtokenSecret,
           profileId: req.session.profileId,
         },
         {
@@ -80,6 +66,7 @@ router.post('/create', async (req, res) => {
     }
     res.json(kaspiResponse);
   } catch (err) {
+    recordRequest({ serviceName: req.serviceName, kind: 'qr', amount: Number(amount), status: 'error', error: err.message });
     res.status(500).json({ error: err.message });
   }
 });
@@ -93,7 +80,9 @@ router.get('/status', async (req, res) => {
   try {
     const url = `${KASPI_QRPAY_URL}/v02/kaspi-qr/status?qrOperationId=${qrOperationId}`;
     const resp = await loggedFetch(url, { headers: signedQrPayHeaders(url, req.session) });
-    res.json(await resp.json());
+    const body = await resp.json();
+    if (body.Data?.Status) updateOperationStatus(qrOperationId, body.Data.Status);
+    res.json(body);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

@@ -1,5 +1,4 @@
 import crypto from 'crypto';
-import fetch from 'node-fetch';
 import { DEVICE, APP, UA_NATIVE } from './config.js';
 import { computeTokenSnMac, computeXSign } from './crypto.js';
 
@@ -13,15 +12,9 @@ export const nowISO = () => {
   const sign = off >= 0 ? '+' : '-';
   const hh = String(Math.floor(Math.abs(off) / 60)).padStart(2, '0');
   const mm = String(Math.abs(off) % 60).padStart(2, '0');
-  return (
-    d
-      .toISOString()
-      .replace('Z', '')
-      .replace(/\.\d{3}/, `.${String(d.getMilliseconds()).padStart(3, '0')}`) +
-    sign +
-    hh +
-    mm
-  );
+  const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const time = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}.${String(d.getMilliseconds()).padStart(3, '0')}`;
+  return `${date}T${time}${sign}${hh}${mm}`;
 };
 
 // ─── Cookie builder ───
@@ -35,7 +28,7 @@ export const entranceCookie = (extraUserToken) => {
 // ─── Extract user_token from set-cookie ───
 
 export const extractUserToken = (resp) => {
-  const raw = resp.headers.raw()['set-cookie'] || [];
+  const raw = resp.headers.getSetCookie?.() || resp.headers.raw?.()['set-cookie'] || [];
   for (const c of raw) {
     const m = c.match(/user_token=([^;]+)/);
     if (m) return m[1];
@@ -47,30 +40,9 @@ export const extractUserToken = (resp) => {
 
 export const loggedFetch = async (url, options = {}) => {
   const method = (options.method || 'GET').toUpperCase();
-  console.log(`\n>>> ${method} ${url}`);
-  if (options.headers) console.log('>>> Headers:', JSON.stringify(options.headers, null, 2));
-  if (options.body) {
-    try {
-      console.log('>>> Body:', JSON.parse(options.body));
-    } catch {
-      console.log('>>> Body:', options.body);
-    }
-  }
-
   const resp = await fetch(url, options);
-  const cloned = resp.clone();
-  let body;
-  try {
-    body = await cloned.json();
-  } catch {
-    try {
-      body = await cloned.text();
-    } catch {
-      body = '[unreadable]';
-    }
-  }
-  console.log(`<<< ${resp.status} ${resp.statusText}`);
-  console.log('<<< Response:', typeof body === 'object' ? JSON.stringify(body, null, 2) : body);
+  // Headers and payloads contain Kaspi credentials, OTPs, phone numbers and payment data.
+  console.log(`[KASPI] ${method} ${new URL(url).pathname} → ${resp.status}`);
   return resp;
 };
 

@@ -1,32 +1,13 @@
 import { Router } from 'express';
 import { KASPI_QRPAY_URL } from '../config.js';
 import { loggedFetch, signedQrPayHeaders } from '../helpers.js';
-import { decryptSecret } from '../crypto.js';
+import { requireKaspiSession } from '../kaspiSession.js';
 import { trackPayment } from '../polling.js';
+import { recordRequest, updateOperationStatus } from '../audit.js';
 
 const router = Router();
 
-// Extract session from request headers
-const extractSession = (req) => ({
-  tokenSN: req.headers['x-token-sn'] || null,
-  profileId: req.headers['x-profile-id'] || null,
-  vtokenSecret: req.headers['x-vtoken-secret'] || null,
-});
-
-const requireAuth = (req, res, next) => {
-  const session = extractSession(req);
-  if (!session.tokenSN) return res.status(401).json({ error: 'Missing X-Token-SN header.' });
-  if (!session.vtokenSecret) return res.status(401).json({ error: 'Missing X-Vtoken-Secret header.' });
-  try {
-    session.decryptedSecret = decryptSecret(session.vtokenSecret);
-  } catch {
-    return res.status(401).json({ error: 'Invalid or expired vtokenSecret. Re-authenticate.' });
-  }
-  req.session = session;
-  next();
-};
-
-router.use(requireAuth);
+router.use(requireKaspiSession);
 
 // ─── Client info ───
 
@@ -47,7 +28,8 @@ router.get('/client-info', async (req, res) => {
 
 router.post('/create', async (req, res) => {
   const { phoneNumber, amount, comment } = req.body;
-  if (!phoneNumber || !amount) return res.status(400).json({ error: 'phoneNumber and amount required' });
+  if (!/^\d{10,11}$/.test(String(phoneNumber)) || !Number.isFinite(Number(amount)) || Number(amount) <= 0)
+    return res.status(400).json({ error: 'Valid phoneNumber and positive amount required' });
 
   try {
     const url = `${KASPI_QRPAY_URL}/v01/remote/create`;
@@ -60,13 +42,21 @@ router.post('/create', async (req, res) => {
     });
     const kaspiResponse = await resp.json();
     const d = kaspiResponse.Data;
-    if (d && d.QrOperationId) {
+    const operationId = d?.QrOperationId ?? d?.Id;
+    recordRequest({
+      serviceName: req.serviceName, kind: 'invoice', operationId,
+      recipientPhone: String(phoneNumber), amount: Number(amount), comment,
+      status: operationId ? (d.Status || 'RemotePaymentCreated') : 'rejected',
+      kaspiStatusCode: kaspiResponse.StatusCode,
+      error: operationId ? null : kaspiResponse.Message || 'Kaspi did not create an invoice',
+    });
+    if (operationId && kaspiResponse.StatusCode === 0) {
       trackPayment(
-        d.QrOperationId,
+        operationId,
         'invoice',
         {
           tokenSN: req.session.tokenSN,
-          vtokenSecret: req.headers['x-vtoken-secret'],
+          vtokenSecret: req.session.vtokenSecret,
           profileId: req.session.profileId,
         },
         {
@@ -79,6 +69,7 @@ router.post('/create', async (req, res) => {
     }
     res.json(kaspiResponse);
   } catch (err) {
+    recordRequest({ serviceName: req.serviceName, kind: 'invoice', recipientPhone: String(phoneNumber), amount: Number(amount), comment, status: 'error', error: err.message });
     res.status(500).json({ error: err.message });
   }
 });
@@ -92,7 +83,9 @@ router.get('/details', async (req, res) => {
   try {
     const url = `${KASPI_QRPAY_URL}/v02/remote/details?operationId=${operationId}`;
     const resp = await loggedFetch(url, { headers: signedQrPayHeaders(url, req.session) });
-    res.json(await resp.json());
+    const body = await resp.json();
+    if (body.Data?.Status) updateOperationStatus(operationId, body.Data.Status);
+    res.json(body);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -113,7 +106,9 @@ router.post('/cancel', async (req, res) => {
       headers,
       body: payload,
     });
-    res.json(await resp.json());
+    const body = await resp.json();
+    recordRequest({ serviceName: req.serviceName, kind: 'cancel', operationId, status: body.StatusCode === 0 ? 'accepted' : 'rejected', kaspiStatusCode: body.StatusCode, error: body.StatusCode === 0 ? null : body.Message });
+    res.json(body);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

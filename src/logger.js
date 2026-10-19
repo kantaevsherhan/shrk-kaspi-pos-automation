@@ -1,13 +1,12 @@
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
+import { STATE_DIR } from './config.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const LOGS_DIR = path.join(__dirname, '..', 'logs');
+const LOGS_DIR = path.join(STATE_DIR, 'logs');
 
 // Ensure logs directory exists
 if (!fs.existsSync(LOGS_DIR)) {
-  fs.mkdirSync(LOGS_DIR, { recursive: true });
+  fs.mkdirSync(LOGS_DIR, { recursive: true, mode: 0o700 });
 }
 
 const getLogFile = () => {
@@ -30,7 +29,7 @@ const writeLine = (level, tag, message, extra) => {
 
   // Write to file
   try {
-    fs.appendFileSync(getLogFile(), line);
+    fs.appendFileSync(getLogFile(), line, { mode: 0o600 });
   } catch (err) {
     console.error('Failed to write log:', err.message);
   }

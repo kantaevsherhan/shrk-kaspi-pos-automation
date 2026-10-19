@@ -1,11 +1,9 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import {fileURLToPath} from 'url';
-import {ecKeyPair} from './config.js';
+import {ecKeyPair, STATE_DIR} from './config.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ECDH_FILE = path.join(__dirname, '..', 'ecdh-keypair.json');
+const ECDH_FILE = path.join(STATE_DIR, 'ecdh-keypair.json');
 
 // ─── ECDH ───
 
@@ -13,11 +11,8 @@ const vtokenSuite = 'OCRA-1:HOTP-SHA256-6:QH64-T1M';
 
 // ─── AES-256-GCM encryption for vtokenSecret ───
 
-if (!process.env.TOKEN_SECRET_KEY) {
-  console.error('FATAL: TOKEN_SECRET_KEY environment variable is not set.');
-  console.error('Generate one with: echo "TOKEN_SECRET_KEY=$(openssl rand -hex 32)" > .env');
-  process.exit(1);
-}
+if (!/^[0-9a-fA-F]{64}$/.test(process.env.TOKEN_SECRET_KEY || ''))
+  throw new Error('TOKEN_SECRET_KEY must be 64 hexadecimal characters (32 bytes).');
 const ENCRYPTION_KEY = Buffer.from(process.env.TOKEN_SECRET_KEY, 'hex');
 
 export const encryptSecret = (secretBuffer) => {
@@ -47,7 +42,7 @@ export const generateECDH = () => {
     privateKey: lastEcdhKeyPair.privateKey.export({type: 'pkcs8', format: 'der'}).toString('base64'),
     publicKey: lastEcdhKeyPair.publicKey.export({type: 'spki', format: 'der'}).toString('base64'),
   };
-  fs.writeFileSync(ECDH_FILE, JSON.stringify(saved, null, 2));
+  fs.writeFileSync(ECDH_FILE, JSON.stringify(saved, null, 2), { mode: 0o600 });
   const spki = lastEcdhKeyPair.publicKey.export({type: 'spki', format: 'der'});
   return spki.toString('base64');
 };

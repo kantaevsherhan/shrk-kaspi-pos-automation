@@ -1,38 +1,19 @@
 import { Router } from 'express';
 import { KASPI_QRPAY_URL } from '../config.js';
 import { loggedFetch, signedQrPayHeaders } from '../helpers.js';
-import { decryptSecret } from '../crypto.js';
+import { requireKaspiSession } from '../kaspiSession.js';
+import { recordRequest } from '../audit.js';
 
 const router = Router();
 
-// Extract session from request headers
-const extractSession = (req) => ({
-  tokenSN: req.headers['x-token-sn'] || null,
-  profileId: req.headers['x-profile-id'] || null,
-  vtokenSecret: req.headers['x-vtoken-secret'] || null,
-});
-
-const requireAuth = (req, res, next) => {
-  const session = extractSession(req);
-  if (!session.tokenSN) return res.status(401).json({ error: 'Missing X-Token-SN header.' });
-  if (!session.vtokenSecret) return res.status(401).json({ error: 'Missing X-Vtoken-Secret header.' });
-  try {
-    session.decryptedSecret = decryptSecret(session.vtokenSecret);
-  } catch {
-    return res.status(401).json({ error: 'Invalid or expired vtokenSecret. Re-authenticate.' });
-  }
-  req.session = session;
-  next();
-};
-
-router.use(requireAuth);
+router.use(requireKaspiSession);
 
 // ─── Return (refund) ───
 
 router.post('/create', async (req, res) => {
   const { qrOperationId, returnAmount } = req.body;
-  if (!qrOperationId || !returnAmount)
-    return res.status(400).json({ error: 'qrOperationId and returnAmount required' });
+  if (!/^\d+$/.test(String(qrOperationId)) || !Number.isFinite(Number(returnAmount)) || Number(returnAmount) <= 0)
+    return res.status(400).json({ error: 'Valid qrOperationId and positive returnAmount required' });
   try {
     const url = `${KASPI_QRPAY_URL}/v01/kaspi-qr/history-pos-return`;
     const payload = JSON.stringify({
@@ -46,8 +27,14 @@ router.post('/create', async (req, res) => {
       headers,
       body: payload,
     });
-    res.json(await resp.json());
+    const body = await resp.json();
+    recordRequest({ serviceName: req.serviceName, kind: 'refund', operationId: qrOperationId,
+      amount: Number(returnAmount), status: body.StatusCode === 0 ? 'accepted' : 'rejected',
+      kaspiStatusCode: body.StatusCode, error: body.StatusCode === 0 ? null : body.Message });
+    res.json(body);
   } catch (err) {
+    recordRequest({ serviceName: req.serviceName, kind: 'refund', operationId: qrOperationId,
+      amount: Number(returnAmount), status: 'error', error: err.message });
     res.status(500).json({ error: err.message });
   }
 });

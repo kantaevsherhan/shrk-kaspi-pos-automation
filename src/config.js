@@ -1,4 +1,3 @@
-import 'dotenv/config';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
@@ -6,12 +5,16 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(__dirname, '..');
+if (fs.existsSync(path.join(ROOT_DIR, '.env'))) process.loadEnvFile(path.join(ROOT_DIR, '.env'));
+export const STATE_DIR = path.resolve(process.env.STATE_DIR || ROOT_DIR);
+fs.mkdirSync(STATE_DIR, { recursive: true });
 
 export const PORT = process.env.PORT || 3000;
+export const HOST = process.env.HOST || '127.0.0.1';
 
 // ─── ECDSA P-256 keypair (persisted to keypair.json) ───
 
-const KEYPAIR_FILE = path.join(ROOT_DIR, 'keypair.json');
+const KEYPAIR_FILE = path.join(STATE_DIR, 'keypair.json');
 
 let ecKeyPair;
 if (fs.existsSync(KEYPAIR_FILE)) {
@@ -27,7 +30,7 @@ if (fs.existsSync(KEYPAIR_FILE)) {
     privateKey: ecKeyPair.privateKey.export({ type: 'pkcs8', format: 'der' }).toString('base64'),
     publicKey: ecKeyPair.publicKey.export({ type: 'spki', format: 'der' }).toString('base64'),
   };
-  fs.writeFileSync(KEYPAIR_FILE, JSON.stringify(saved, null, 2));
+  fs.writeFileSync(KEYPAIR_FILE, JSON.stringify(saved, null, 2), { mode: 0o600 });
   console.log('Generated new ECDSA keypair → saved to keypair.json');
 }
 
@@ -42,7 +45,7 @@ const pkTagHash = crypto.createHash('md5').update(pkB64).digest('hex');
 
 // ─── Device identity (persisted to device.json) ───
 
-const DEVICE_FILE = path.join(ROOT_DIR, 'device.json');
+const DEVICE_FILE = path.join(STATE_DIR, 'device.json');
 
 let deviceId, installId, pinHash;
 if (fs.existsSync(DEVICE_FILE)) {
@@ -53,7 +56,7 @@ if (fs.existsSync(DEVICE_FILE)) {
   deviceId = crypto.randomUUID().toUpperCase();
   installId = crypto.randomUUID().toUpperCase();
   pinHash = crypto.createHash('md5').update(crypto.randomBytes(16)).digest('hex');
-  fs.writeFileSync(DEVICE_FILE, JSON.stringify({ deviceId, installId, pinHash }, null, 2));
+  fs.writeFileSync(DEVICE_FILE, JSON.stringify({ deviceId, installId, pinHash }, null, 2), { mode: 0o600 });
   console.log('Generated new device identity → saved to device.json');
 }
 
@@ -66,9 +69,6 @@ export const DEVICE = {
   x509: x509B64,
 };
 
-console.log('  pk:', DEVICE.pk);
-console.log('  x509:', DEVICE.x509);
-console.log('  pkTag:', DEVICE.pkTag);
 
 // ─── Kaspi Base URLs ───
 

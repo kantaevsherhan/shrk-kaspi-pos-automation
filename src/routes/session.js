@@ -1,34 +1,14 @@
 import { Router } from 'express';
 import { KASPI_QRPAY_URL } from '../config.js';
 import { loggedFetch, signedQrPayHeaders } from '../helpers.js';
-import { decryptSecret } from '../crypto.js';
+import { requireKaspiSession } from '../kaspiSession.js';
 
 const router = Router();
 
-// Extract session from request headers
-const extractSession = (req) => ({
-  tokenSN: req.headers['x-token-sn'] || null,
-  profileId: req.headers['x-profile-id'] || null,
-  vtokenSecret: req.headers['x-vtoken-secret'] || null,
-});
-
 // ─── Check session validity ───
 
-router.get('/check', async (req, res) => {
-  const session = extractSession(req);
-
-  // 1. Check required headers
-  if (!session.tokenSN) return res.status(401).json({ active: false, error: 'Missing X-Token-SN header.' });
-  if (!session.vtokenSecret) return res.status(401).json({ active: false, error: 'Missing X-Vtoken-Secret header.' });
-
-  // 2. Try to decrypt vtokenSecret
-  try {
-    session.decryptedSecret = decryptSecret(session.vtokenSecret);
-  } catch {
-    return res.status(401).json({ active: false, error: 'Invalid or expired vtokenSecret. Re-authenticate.' });
-  }
-
-  // 3. Ping Kaspi API to verify the token is still accepted
+router.get('/check', requireKaspiSession, async (req, res) => {
+  const session = req.session;
   try {
     const url = `${KASPI_QRPAY_URL}/v02/history/operations`;
     const payload = JSON.stringify({
@@ -47,7 +27,7 @@ router.get('/check', async (req, res) => {
 
     // Kaspi may return HTTP 200 but with error StatusCode in body
     if (resp.ok && (!body.StatusCode || body.StatusCode === 0)) {
-      return res.json({ active: true });
+      return res.json({ active: true, orgName: session.orgName || null, phone: session.phone || null });
     }
 
     return res.status(resp.ok ? 401 : resp.status).json({

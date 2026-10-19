@@ -1,9 +1,8 @@
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
+import { STATE_DIR } from './config.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const WEBHOOKS_FILE = path.join(__dirname, '..', 'webhooks.json');
+const WEBHOOKS_FILE = process.env.WEBHOOKS_FILE || path.join(STATE_DIR, 'webhooks.json');
 
 /**
  * Читает webhooks.json и возвращает массив вебхуков.

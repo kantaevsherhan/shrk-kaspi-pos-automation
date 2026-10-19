@@ -11,11 +11,22 @@ import {
   encryptSecret,
 } from '../crypto.js';
 import { loggedFetch, extractUserToken, entranceCookie, generateUUID, nowISO } from '../helpers.js';
+import { saveKaspiSession, clearKaspiSession, loadKaspiSession } from '../audit.js';
 
 const router = Router();
 
 // In-flight auth sessions keyed by processId (temporary, cleared after finish)
 const authSessions = new Map();
+const AUTH_TTL_MS = 10 * 60 * 1000;
+const getAuthSession = (processId) => {
+  const session = authSessions.get(processId);
+  if (!session) return null;
+  if (Date.now() - session.createdAt > AUTH_TTL_MS) {
+    authSessions.delete(processId);
+    return null;
+  }
+  return session;
+};
 
 // ═══════════════════════════════════════════════════
 //  Step 1 — Init entrance (get processId)
@@ -23,6 +34,11 @@ const authSessions = new Map();
 
 router.post('/init', async (req, res) => {
   const session = createEmptySession();
+  session.createdAt = Date.now();
+  for (const [id, entry] of authSessions) {
+    if (Date.now() - entry.createdAt > AUTH_TTL_MS) authSessions.delete(id);
+  }
+  if (authSessions.size >= 100) return res.status(429).json({ error: 'Too many active SMS logins. Try again later.' });
 
   try {
     const resp = await loggedFetch(`${KASPI_ENTRANCE_URL}/api/v1/entrance/step`, {
@@ -77,7 +93,7 @@ router.post('/send-phone', async (req, res) => {
   if (!phoneNumber) return res.status(400).json({ error: 'phoneNumber required (e.g. 7XXXXXXXXX)' });
   if (!processId) return res.status(400).json({ error: 'processId required (from /api/auth/init)' });
 
-  const session = authSessions.get(processId);
+  const session = getAuthSession(processId);
   if (!session) return res.status(400).json({ error: 'Unknown processId. Call /api/auth/init first' });
 
   session.phoneNumber = phoneNumber;
@@ -136,7 +152,7 @@ router.post('/verify-otp', async (req, res) => {
   if (!otp) return res.status(400).json({ error: 'otp required' });
   if (!processId) return res.status(400).json({ error: 'processId required' });
 
-  const session = authSessions.get(processId);
+  const session = getAuthSession(processId);
   if (!session) return res.status(400).json({ error: 'Unknown processId' });
 
   try {
@@ -168,7 +184,6 @@ router.post('/verify-otp', async (req, res) => {
         processId: session.processId,
         step: 'finished',
         message: 'OTP verified and finish completed',
-        otpBody: body,
         ...finishResult,
       });
     } else {
@@ -185,7 +200,6 @@ router.post('/verify-otp', async (req, res) => {
 
 async function doFinish(session) {
   const ecdhX509 = generateECDH();
-  console.log('Generated ECDH public key for guard.x509:', ecdhX509);
 
   const signedDataObj = {
     installId: DEVICE.installId,
@@ -244,6 +258,7 @@ async function doFinish(session) {
         console.error('ECDH key agreement failed:', e.message);
       }
     }
+    if (!rawSecret || !vtokenSecret) throw new Error('Kaspi did not establish a secure session.');
 
     // Fetch org context
     const orgUrl = `${KASPI_MTOKEN_URL}/v08/organizations/org-context-otp`;
@@ -306,15 +321,17 @@ async function doFinish(session) {
       applyOrgContext(session, orgBody.Data);
     }
 
-    return {
+    const connected = {
       tokenSN: session.tokenSN,
       vtokenSecret,
       profileId: session.profileId,
       organizationId: session.organizationId,
       orgName: session.orgName,
       phone: session.phoneNumber,
-      organizations: orgBody.Data?.Organizations,
     };
+    saveKaspiSession(connected);
+    return { profileId: connected.profileId, organizationId: connected.organizationId,
+      orgName: connected.orgName, phone: connected.phone };
   } else {
     throw new Error('Finish failed: ' + JSON.stringify(body));
   }
@@ -323,13 +340,14 @@ async function doFinish(session) {
 // ─── Session status (client sends tokenSN) ───
 
 router.post('/session', (req, res) => {
-  const { tokenSN } = req.body || {};
-  res.json({ authenticated: !!tokenSN, tokenSN });
+  const session = loadKaspiSession();
+  res.json({ authenticated: !!session, orgName: session?.orgName || null, phone: session?.phone || null });
 });
 
 // ─── Logout ───
 
 router.post('/logout', (req, res) => {
+  clearKaspiSession();
   res.json({ success: true });
 });
 

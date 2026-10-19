@@ -1,16 +1,14 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import fetch from 'node-fetch';
-import { fileURLToPath } from 'url';
-import { KASPI_QRPAY_URL } from './config.js';
+import { KASPI_QRPAY_URL, STATE_DIR } from './config.js';
 import { signedQrPayHeaders } from './helpers.js';
 import { decryptSecret } from './crypto.js';
 import { getWebhooksByEvent } from './webhookStore.js';
 import { logger } from './logger.js';
+import { updateOperationStatus } from './audit.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const TRACKED_FILE = path.join(__dirname, '..', 'tracked-payments.json');
+const TRACKED_FILE = path.join(STATE_DIR, 'tracked-payments.json');
 
 // ─── Tracked payments ───
 
@@ -21,7 +19,7 @@ const trackedPayments = new Map();
 const saveTracked = () => {
   try {
     const data = Object.fromEntries(trackedPayments);
-    fs.writeFileSync(TRACKED_FILE, JSON.stringify(data, null, 2));
+    fs.writeFileSync(TRACKED_FILE, JSON.stringify(data, null, 2), { mode: 0o600 });
   } catch (err) {
     logger.error('POLLING', 'Failed to save tracked payments', err.message);
   }
@@ -45,12 +43,12 @@ const loadTracked = () => {
 
 // ─── Pending retries (persisted) ───
 
-const RETRY_FILE = path.join(__dirname, '..', 'webhook-retries.json');
+const RETRY_FILE = path.join(STATE_DIR, 'webhook-retries.json');
 let pendingRetries = [];
 
 const saveRetries = () => {
   try {
-    fs.writeFileSync(RETRY_FILE, JSON.stringify(pendingRetries, null, 2));
+    fs.writeFileSync(RETRY_FILE, JSON.stringify(pendingRetries, null, 2), { mode: 0o600 });
   } catch (err) {
     logger.error('WEBHOOK', 'Failed to save retries', err.message);
   }
@@ -100,7 +98,7 @@ const INVOICE_FINAL_STATUSES = {
   Expired: 'payment.expired',
 };
 
-const QR_INTERMEDIATE = new Set(['QrTokenCreated', 'Wait']);
+const QR_INTERMEDIATE = new Set(['QrTokenCreated', 'QrTokenScanned', 'PaymentConfirmation', 'Wait']);
 const INVOICE_INTERMEDIATE = new Set(['RemotePaymentCreated']);
 
 // ─── Track a payment ───
@@ -194,6 +192,7 @@ const sendWebhook = async (hook, payload, attempt = 1) => {
       },
       body,
     });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     logger.info('WEBHOOK', `→ ${hook.url} | ${resp.status} ${resp.statusText}`);
     // Remove from pending retries on success
     pendingRetries = pendingRetries.filter(
@@ -250,10 +249,10 @@ const processRetries = async () => {
 const resolveEvent = (type, status) => {
   if (type === 'qr') {
     if (QR_INTERMEDIATE.has(status)) return null;
-    return QR_FINAL_STATUSES[status] || 'payment.failed';
+    return QR_FINAL_STATUSES[status] || null;
   } else {
     if (INVOICE_INTERMEDIATE.has(status)) return null;
-    return INVOICE_FINAL_STATUSES[status] || 'payment.failed';
+    return INVOICE_FINAL_STATUSES[status] || null;
   }
 };
 
@@ -284,10 +283,10 @@ const pollOnce = async () => {
     if (result && result.error === 'session_expired') {
       entry.retryCount++;
       if (entry.retryCount > 3) {
-        logger.warn('POLLING', `Payment ${id} — session expired, sending session.expired webhook`);
+        logger.warn('POLLING', `Payment ${id} — session expired, status unknown`);
         sendWebhooks(
-          'payment.failed',
-          buildPayload('payment.failed', entry, {
+          'payment.lost',
+          buildPayload('payment.lost', entry, {
             Status: 'SessionExpired',
             StatusDesc: 'Сессия Kaspi истекла, невозможно проверить статус платежа',
           }),
@@ -338,6 +337,7 @@ const pollOnce = async () => {
 
     logger.info('POLLING', `Payment ${id}: ${entry.status} → ${newStatus}`);
     entry.status = newStatus;
+    updateOperationStatus(id, newStatus);
     changed = true;
 
     const event = resolveEvent(entry.type, newStatus);

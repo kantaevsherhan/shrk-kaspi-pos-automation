@@ -24,6 +24,7 @@ describe('nowISO', () => {
     const result = nowISO();
     // Should match pattern like 2025-05-09T12:00:00.000+0600
     assert.match(result, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{4}$/);
+    assert.ok(Math.abs(new Date(result).getTime() - Date.now()) < 1000);
   });
 });
 
