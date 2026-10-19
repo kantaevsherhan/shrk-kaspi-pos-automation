@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Kaspi Pay</title>
+    <title>Kaspi POS — платежи</title>
     <style>
       * {
         box-sizing: border-box;
@@ -275,13 +275,23 @@
         color: #888;
       }
     </style>
+    <link rel="stylesheet" href="/dashboard.css" />
   </head>
   <body>
     <div class="container">
-      <h1>🏦 Kaspi Pay</h1>
+      <header class="page-header"><div class="brand-mark">K</div><div><h1>Kaspi POS</h1><p>Управление платежами</p></div><span class="header-status">● Сервис работает</span></header>
+      <div id="serviceGate" class="card access-card">
+        <div class="eyebrow">ДОСТУП К СЕРВИСУ</div>
+        <h2>Подключите ваш сервис</h2>
+        <p class="muted">Введите Bearer-ключ из SERVICE_API_KEYS. Он действует только в этой вкладке браузера.</p>
+        <label for="serviceKeyInput">Ключ доступа</label>
+        <input id="serviceKeyInput" type="password" autocomplete="off" placeholder="Вставьте ключ доступа" />
+        <button class="btn btn-primary" onclick="connectService()">Продолжить</button>
+        <div id="serviceKeyError" class="status-bar status-err hidden" role="alert"></div>
+      </div>
 
       <!-- ═══ AUTH SCREEN ═══ -->
-      <div id="authScreen">
+      <div id="authScreen" class="hidden">
         <div class="card">
           <div class="step-indicator">
             <div class="step-dot" id="dot1"></div>
@@ -346,12 +356,14 @@
           </div>
         </div>
 
+        <div class="section-heading"><div><div class="eyebrow">РАБОЧЕЕ МЕСТО</div><h2>Платежи</h2></div><p>Счета, QR, история и возвраты в одном месте</p></div>
         <!-- Tabs -->
         <div class="tabs">
           <button class="tab active" id="tabInvoice" onclick="switchTab('invoice')">Счёт</button>
           <button class="tab" id="tabQr" onclick="switchTab('qr')">Создать QR</button>
           <button class="tab" id="tabHistory" onclick="switchTab('history')">История</button>
           <button class="tab" id="tabSales" onclick="switchTab('sales')">Продажи</button>
+          <button class="tab" id="tabAudit" onclick="switchTab('audit')">Журнал сервиса</button>
         </div>
 
         <!-- Invoice Tab -->
@@ -473,6 +485,13 @@
                 Закрыть
               </button>
             </div>
+          </div>
+        </div>
+        <div id="auditTab" class="hidden">
+          <div class="card">
+            <div class="card-heading"><div><div class="eyebrow">ЛОКАЛЬНАЯ ИСТОРИЯ</div><h2>Запросы ваших сервисов</h2></div><button class="btn btn-secondary" onclick="loadAudit()">Обновить</button></div>
+            <p class="muted">Здесь видны счета, QR и возвраты, созданные с текущим ключом доступа.</p>
+            <div id="auditList" class="audit-list"></div>
           </div>
         </div>
       </div>

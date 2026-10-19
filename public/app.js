@@ -1,6 +1,8 @@
 // ─── Kaspi Pay — Frontend App ───
 
 const API = '';
+const SERVICE_KEY = 'kaspi_service_key';
+const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 
 // ─── State ───
 
@@ -10,6 +12,7 @@ let historyOpId = null;
 let qrPollingTimer = null;
 let qrCountdownTimer = null;
 let qrOperationId = null;
+let currentQrUrl = null;
 
 // ─── Helpers ───
 
@@ -18,25 +21,18 @@ const digitsOnly = (str) => str.replace(/\D/g, '');
 
 const getSession = () => {
   try {
-    return JSON.parse(localStorage.getItem('kaspi_session') || '{}');
+    return JSON.parse(sessionStorage.getItem('kaspi_session') || '{}');
   } catch {
     return {};
   }
 };
 
-const sessionHeaders = () => {
-  const s = getSession();
-  const h = {};
-  if (s.tokenSN) h['X-Token-SN'] = s.tokenSN;
-  if (s.profileId) h['X-Profile-ID'] = String(s.profileId);
-  if (s.vtokenSecret) h['X-Vtoken-Secret'] = s.vtokenSecret;
-  return h;
-};
-
 const apiFetch = async (path, opts = {}) => {
-  opts.headers = { ...sessionHeaders(), ...(opts.headers || {}) };
+  opts.headers = { Authorization: `Bearer ${sessionStorage.getItem(SERVICE_KEY) || ''}`, ...(opts.headers || {}) };
   const resp = await fetch(API + path, opts);
-  return resp.json();
+  const body = await resp.json();
+  if (!resp.ok) throw new Error(body.error || `HTTP ${resp.status}`);
+  return body;
 };
 
 const apiPost = (path, body) =>
@@ -46,26 +42,37 @@ const apiPost = (path, body) =>
     ...(body !== undefined && { body: JSON.stringify(body) }),
   });
 
-// ─── Session Persistence (localStorage) ───
+// ─── Display metadata for the current browser tab ───
 
 const SESSION_KEY = 'kaspi_session';
 
 const saveSession = (data) => {
-  let prev = {};
-  try {
-    prev = JSON.parse(localStorage.getItem(SESSION_KEY) || '{}');
-  } catch {}
-  const merged = { ...prev, ...data };
-  if (data.phone) merged.phoneNumber = data.phone;
-  localStorage.setItem(SESSION_KEY, JSON.stringify(merged));
+  sessionStorage.setItem(SESSION_KEY, JSON.stringify({ orgName: data.orgName, phone: data.phone }));
 };
 
-const clearSession = () => localStorage.removeItem(SESSION_KEY);
+const clearSession = () => sessionStorage.removeItem(SESSION_KEY);
+
+const connectService = async () => {
+  const key = $('serviceKeyInput').value.trim();
+  if (!key) return;
+  sessionStorage.setItem(SERVICE_KEY, key);
+  try {
+    await apiFetch('/api/audit/requests?limit=1');
+    $('serviceGate').classList.add('hidden');
+    $('authScreen').classList.remove('hidden');
+    $('serviceKeyInput').value = '';
+    await tryRestoreSession();
+  } catch {
+    sessionStorage.removeItem(SERVICE_KEY);
+    $('serviceKeyError').textContent = 'Ключ не подошёл. Проверьте SERVICE_API_KEYS.';
+    $('serviceKeyError').classList.remove('hidden');
+  }
+};
 
 const checkSession = async () => {
   try {
     const resp = await apiFetch('/api/session/check');
-    if (resp.active === true) return { active: true };
+    if (resp.active === true) return resp;
     return { active: false, error: resp.error || 'Сессия неактивна' };
   } catch {
     return { active: false, error: 'Ошибка проверки сессии' };
@@ -74,21 +81,15 @@ const checkSession = async () => {
 
 const tryRestoreSession = async () => {
   const session = getSession();
-  if (session.tokenSN && session.vtokenSecret) {
-    showMainScreen(session);
-    // Verify session is still active on the server
-    const result = await checkSession();
-    if (!result.active) {
-      clearSession();
-      $('mainScreen').classList.add('hidden');
-      $('authScreen').classList.remove('hidden');
-      setAuthStep(1);
-      showAuthMsg(result.error || 'Сессия истекла. Войдите заново.', 'err');
-      return false;
-    }
+  const result = await checkSession();
+  if (result.active) {
+    showMainScreen({ ...session, ...result });
     return true;
   }
   clearSession();
+  $('mainScreen').classList.add('hidden');
+  $('authScreen').classList.remove('hidden');
+  setAuthStep(1);
   return false;
 };
 
@@ -111,7 +112,15 @@ const attachPhoneFormatter = (el) => {
 };
 
 window.addEventListener('DOMContentLoaded', () => {
-  tryRestoreSession();
+  // Remove credentials written by older versions of the interface.
+  localStorage.removeItem('kaspi_session');
+  if (sessionStorage.getItem(SERVICE_KEY)) {
+    apiFetch('/api/audit/requests?limit=1').then(() => {
+      $('serviceGate').classList.add('hidden');
+      $('authScreen').classList.remove('hidden');
+      tryRestoreSession();
+    }).catch(() => sessionStorage.removeItem(SERVICE_KEY));
+  }
   attachPhoneFormatter($('phoneInput'));
   attachPhoneFormatter($('clientPhone'));
 });
@@ -218,9 +227,8 @@ const showMainScreen = (data) => {
 };
 
 const logout = async () => {
-  const { tokenSN } = getSession();
+  try { await apiPost('/api/auth/logout'); } catch (e) { alert(`Ошибка выхода: ${e.message}`); return; }
   clearSession();
-  await apiPost('/api/auth/logout', { tokenSN });
   $('mainScreen').classList.add('hidden');
   $('authScreen').classList.remove('hidden');
   $('phoneInput').value = '';
@@ -235,12 +243,28 @@ const switchTab = (tab) => {
   $('qrTab').classList.toggle('hidden', tab !== 'qr');
   $('historyTab').classList.toggle('hidden', tab !== 'history');
   $('salesTab').classList.toggle('hidden', tab !== 'sales');
+  $('auditTab').classList.toggle('hidden', tab !== 'audit');
   $('tabInvoice').classList.toggle('active', tab === 'invoice');
   $('tabQr').classList.toggle('active', tab === 'qr');
   $('tabHistory').classList.toggle('active', tab === 'history');
   $('tabSales').classList.toggle('active', tab === 'sales');
+  $('tabAudit').classList.toggle('active', tab === 'audit');
   if (tab === 'history') loadHistory();
   if (tab === 'sales') loadSales();
+  if (tab === 'audit') loadAudit();
+};
+
+const loadAudit = async () => {
+  const list = $('auditList');
+  list.textContent = 'Загрузка…';
+  try {
+    const { data } = await apiFetch('/api/audit/requests?limit=100');
+    list.innerHTML = data.length ? data.map((row) => `<div class="audit-row">
+      <div><strong>${escapeHtml(({ invoice:'Счёт', qr:'QR', refund:'Возврат', cancel:'Отмена' })[row.kind] || row.kind)}</strong><small>${escapeHtml(row.created_at)}</small></div>
+      <div>${escapeHtml(row.recipient_phone || row.operation_id || '—')}</div>
+      <div>${escapeHtml(row.status)}</div><div class="amount">${escapeHtml(row.amount == null ? '—' : `${row.amount} ₸`)}</div>
+    </div>`).join('') : '<p class="muted">Пока нет запросов с этого ключа.</p>';
+  } catch (e) { list.textContent = `Ошибка: ${e.message}`; }
 };
 
 // ─── Invoice ───
@@ -249,11 +273,12 @@ const statusBadge = (status) => {
   const map = {
     RemotePaymentCreated: ['Ожидает оплаты', 'pending'],
     RemotePaymentPaid: ['Оплачен', 'paid'],
+    Processed: ['Оплачен', 'paid'],
     RemotePaymentCanceled: ['Отменён', 'canceled'],
     RemotePaymentExpired: ['Истёк', 'expired'],
   };
   const [label, cls] = map[status] || [status, 'pending'];
-  return `<span class="badge badge-${cls}">${label}</span>`;
+  return `<span class="badge badge-${cls}">${escapeHtml(label)}</span>`;
 };
 
 const renderDetails = (data, containerId) => {
@@ -264,8 +289,8 @@ const renderDetails = (data, containerId) => {
     .map(
       ({ Title, Data, IsBold }) =>
         `<div class="detail-row">
-        <span class="detail-label">${Title}</span>
-        <span class="detail-value" style="${IsBold ? 'font-weight:700' : ''}">${Data}</span>
+        <span class="detail-label">${escapeHtml(Title)}</span>
+        <span class="detail-value" style="${IsBold ? 'font-weight:700' : ''}">${escapeHtml(Data)}</span>
       </div>`,
     )
     .join('');
@@ -317,8 +342,8 @@ const createInvoice = async () => {
       comment,
     });
 
-    if (resp.Data?.QrOperationId) {
-      currentOpId = resp.Data.QrOperationId;
+    if (resp.Data?.QrOperationId || resp.Data?.Id) {
+      currentOpId = resp.Data.QrOperationId || resp.Data.Id;
       $('invoiceOpId').textContent = `#${currentOpId}`;
       $('invoiceResult').classList.remove('hidden');
       $('clientPhone').value = '';
@@ -351,6 +376,7 @@ const cancelInvoice = async () => {
 
 const FINAL_QR_STATUSES = [
   'Paid',
+  'Processed',
   'CancelledByUser',
   'NotConfirmedByUser',
   'QrTokenDiscarded',
@@ -365,6 +391,7 @@ const qrStatusBadge = (status) => {
     QrTokenScanned: ['Отсканирован', 'info'],
     PaymentConfirmation: ['Подтверждение оплаты...', 'warn'],
     Paid: ['Оплачено ✅', 'ok'],
+    Processed: ['Оплачено ✅', 'ok'],
     CancelledByUser: ['Отменено клиентом', 'err'],
     NotConfirmedByUser: ['Не подтверждено', 'err'],
     QrTokenDiscarded: ['QR не отсканирован', 'err'],
@@ -423,10 +450,9 @@ const startQrCountdown = (seconds) => {
   qrCountdownTimer = setInterval(tick, 1000);
 };
 
-const generateQrSvg = (text, size = 256) => {
-  // Simple QR placeholder using a data URL image via an API
-  // For production, use a proper QR library; here we use a public API fallback
-  return `<img src="https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&data=${encodeURIComponent(text)}" alt="QR Code" style="max-width:100%;border-radius:8px;">`;
+const showExternalQr = () => {
+  if (!currentQrUrl) return;
+  $('qrCodeContainer').innerHTML = `<img src="https://api.qrserver.com/v1/create-qr-code/?size=256x256&data=${encodeURIComponent(currentQrUrl)}" alt="QR для оплаты" style="max-width:100%;border-radius:8px;">`;
 };
 
 const createQr = async () => {
@@ -448,7 +474,9 @@ const createQr = async () => {
       const pollInterval = (parseInt(options.qrCodeScanEventPollingInterval) || 3) * 1000;
       const waitTimeout = parseInt(options.qrCodeScanWaitTimeout) || 180;
 
-      $('qrCodeContainer').innerHTML = generateQrSvg(resp.Data.QrOriginalToken);
+      currentQrUrl = resp.Data.QrOriginalToken || resp.Data.QrToken;
+      if (!/^https:\/\//i.test(currentQrUrl)) throw new Error('Kaspi вернул неверную ссылку QR');
+      $('qrCodeContainer').innerHTML = `<p class="muted">Ссылка для оплаты готова.</p><a href="${escapeHtml(currentQrUrl)}" target="_blank" rel="noopener noreferrer">Открыть ссылку оплаты</a><p class="muted">Для показа QR картинка создаётся через сторонний api.qrserver.com. Ссылка оплаты будет передана ему.</p><button class="btn btn-secondary" onclick="showExternalQr()">Показать QR через внешний сервис</button>`;
       $('qrStatus').className = 'status-bar status-info';
       $('qrStatus').textContent = 'Ожидание сканирования...';
       $('qrResult').classList.remove('hidden');
@@ -470,6 +498,7 @@ const createQr = async () => {
 const resetQr = () => {
   stopQrPolling();
   qrOperationId = null;
+  currentQrUrl = null;
   $('qrResult').classList.add('hidden');
   $('qrCodeContainer').innerHTML = '';
   $('qrTimer').textContent = '';
@@ -518,14 +547,14 @@ const loadHistory = async () => {
     list.innerHTML = ops
       .map(
         (op) => `
-        <div class="op-item" onclick="showHistoryDetail(${op.Id})">
+        <div class="op-item" onclick="showHistoryDetail(${Number(op.Id)})">
           <div class="op-row">
             <div>
-              <div class="op-name">${op.ClientName || op.ClientShortName || '—'}</div>
-              <div class="op-date">${new Date(op.OrderRegDate).toLocaleString('ru')}</div>
+              <div class="op-name">${escapeHtml(op.ClientName || op.ClientShortName || '—')}</div>
+              <div class="op-date">${escapeHtml(new Date(op.OrderRegDate).toLocaleString('ru'))}</div>
             </div>
             <div style="text-align:right;">
-              <div class="op-amount">${op.Amount}</div>
+              <div class="op-amount">${escapeHtml(op.Amount)}</div>
               ${statusBadge(op.Status)}
             </div>
           </div>
@@ -533,7 +562,7 @@ const loadHistory = async () => {
       )
       .join('');
   } catch (e) {
-    list.innerHTML = `<p style="color:#c62828;">Ошибка: ${e.message}</p>`;
+    list.textContent = `Ошибка: ${e.message}`;
   }
 };
 
@@ -587,8 +616,8 @@ const loadSales = async () => {
     // Stats
     const s = data.Statistic || {};
     stats.innerHTML = `<div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap;">
-      <div style="background:#e8f5e9;padding:8px 14px;border-radius:10px;text-align:center;"><div style="font-size:12px;color:#2e7d32;">Продажи</div><div style="font-weight:700;color:#2e7d32;">${s.SalesAmount ?? 0} ₸</div><div style="font-size:11px;color:#888;">${s.SalesCount ?? 0} шт</div></div>
-      <div style="background:#ffebee;padding:8px 14px;border-radius:10px;text-align:center;"><div style="font-size:12px;color:#c62828;">Возвраты</div><div style="font-weight:700;color:#c62828;">${s.ReturnsAmount ?? 0} ₸</div><div style="font-size:11px;color:#888;">${s.ReturnsCount ?? 0} шт</div></div>
+      <div style="background:#e8f5e9;padding:8px 14px;border-radius:10px;text-align:center;"><div style="font-size:12px;color:#2e7d32;">Продажи</div><div style="font-weight:700;color:#2e7d32;">${escapeHtml(s.SalesAmount ?? 0)} ₸</div><div style="font-size:11px;color:#888;">${escapeHtml(s.SalesCount ?? 0)} шт</div></div>
+      <div style="background:#ffebee;padding:8px 14px;border-radius:10px;text-align:center;"><div style="font-size:12px;color:#c62828;">Возвраты</div><div style="font-weight:700;color:#c62828;">${escapeHtml(s.ReturnsAmount ?? 0)} ₸</div><div style="font-size:11px;color:#888;">${escapeHtml(s.ReturnsCount ?? 0)} шт</div></div>
     </div>`;
     // Operations list
     const dailySets = data.DailySets || [];
@@ -598,19 +627,19 @@ const loadSales = async () => {
     }
     let html = '';
     for (const day of dailySets) {
-      html += `<div style="font-size:13px;color:#888;margin:12px 0 4px;font-weight:600;">${day.Date || ''}</div>`;
+      html += `<div style="font-size:13px;color:#888;margin:12px 0 4px;font-weight:600;">${escapeHtml(day.Date || '')}</div>`;
       for (const op of day.Operations || []) {
         const isReturn = op.OperationType === 1;
         const sign = isReturn ? '+' : '';
         const color = isReturn ? '#c62828' : '#1a1a1a';
-        html += `<div class="op-item" onclick="showSalesDetail(${op.Id}, ${op.OperationMethod || 0})">
+        html += `<div class="op-item" onclick="showSalesDetail(${Number(op.Id)}, ${Number(op.OperationMethod || 0)})">
           <div class="op-row">
             <div>
-              <div class="op-name">${op.ClientName || op.ClientShortName || '—'}</div>
-              <div class="op-date">${op.Time || ''}</div>
+              <div class="op-name">${escapeHtml(op.ClientName || op.ClientShortName || '—')}</div>
+              <div class="op-date">${escapeHtml(op.Time || '')}</div>
             </div>
             <div style="text-align:right;">
-              <div class="op-amount" style="color:${color};">${sign}${op.Amount} ₸</div>
+              <div class="op-amount" style="color:${color};">${sign}${escapeHtml(op.Amount)} ₸</div>
             </div>
           </div>
         </div>`;
@@ -618,7 +647,7 @@ const loadSales = async () => {
     }
     list.innerHTML = html;
   } catch (e) {
-    list.innerHTML = `<p style="color:#c62828;">Ошибка: ${e.message}</p>`;
+    list.textContent = `Ошибка: ${e.message}`;
   }
 };
 
@@ -643,17 +672,17 @@ const showSalesDetail = async (id, operationMethod) => {
       ['Статус', d.StatusDescription],
       ['Доступно к возврату', d.AvailableReturnAmount != null ? `${d.AvailableReturnAmount} ₸` : null],
       ['Тип возврата', d.PossibleReturnType],
-      ['Чек', d.ReceiptUrl ? `<a href="${d.ReceiptUrl}" target="_blank">Открыть</a>` : null],
+      ['Чек', d.ReceiptUrl],
     ];
     for (const [label, value] of fields) {
       if (value != null)
-        rows += `<div class="detail-row"><span class="detail-label">${label}</span><span class="detail-value">${value}</span></div>`;
+        rows += `<div class="detail-row"><span class="detail-label">${escapeHtml(label)}</span><span class="detail-value">${escapeHtml(value)}</span></div>`;
     }
     // Returns history
     if (d.Returns && d.Returns.length) {
       rows += '<div style="margin-top:12px;font-weight:600;font-size:14px;">Возвраты:</div>';
       for (const r of d.Returns) {
-        rows += `<div class="detail-row"><span class="detail-label">${r.Date || ''}</span><span class="detail-value" style="color:#c62828;">${r.Amount} ₸</span></div>`;
+        rows += `<div class="detail-row"><span class="detail-label">${escapeHtml(r.Date || '')}</span><span class="detail-value" style="color:#c62828;">${escapeHtml(r.Amount)} ₸</span></div>`;
       }
     }
     content.innerHTML = rows || '<p style="color:#888;">Нет данных</p>';
@@ -665,7 +694,7 @@ const showSalesDetail = async (id, operationMethod) => {
       refundSection.classList.remove('hidden');
     }
   } catch (e) {
-    content.innerHTML = `<p style="color:#c62828;">Ошибка: ${e.message}</p>`;
+    content.textContent = `Ошибка: ${e.message}`;
   }
 };
 
@@ -703,6 +732,8 @@ const createRefund = async () => {
 // ─── Expose to HTML onclick handlers ───
 
 Object.assign(window, {
+  connectService,
+  loadAudit,
   sendPhone,
   verifyOtp,
   resetAuth,
@@ -712,6 +743,7 @@ Object.assign(window, {
   refreshInvoice,
   cancelInvoice,
   createQr,
+  showExternalQr,
   resetQr,
   loadHistory,
   showHistoryDetail,
@@ -725,8 +757,4 @@ Object.assign(window, {
 
 (() => {
   setAuthStep(1);
-  const session = getSession();
-  if (session.tokenSN && session.vtokenSecret) {
-    showMainScreen(session);
-  }
 })();
