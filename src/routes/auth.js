@@ -262,7 +262,6 @@ async function doFinish(session) {
 
     // Fetch org context
     const orgUrl = `${KASPI_MTOKEN_URL}/v08/organizations/org-context-otp`;
-    const piValue = session.profileId != null ? String(session.profileId) : '';
     const orgHeaders = {
       'Content-Type': 'application/json',
       Accept: '*/*',
