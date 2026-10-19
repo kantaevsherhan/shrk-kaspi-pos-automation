@@ -1,4 +1,7 @@
 /node_modules
+web/node_modules/
+web/dist/
+.toolchains/
 .idea
 .env
 .env.backup
@@ -21,3 +24,4 @@ last-session.json
 data/
 audit.sqlite*
 .pnpm-store/
+web/.pnpm-store/

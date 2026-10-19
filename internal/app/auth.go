@@ -1,0 +1,227 @@
+package app
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+)
+
+func (c *Config) entranceCookie(token string) string {
+	d := c.Device
+	p := c.App
+	cookie := fmt.Sprintf("deviceId=%s; installId=%s; is_mobile_app=true; locale=%s; ma_bld=%s; ma_platform_type=%s; ma_platform_ver=%s; ma_ver=%s; pk=%s; pkTag=%s; xs=R:0|E:0|RH:0|N:0", d.DeviceID, d.InstallID, p.Locale, p.Build, p.Platform, p.PlatformVer, p.Version, d.PK, d.PKTag)
+	if token != "" {
+		cookie += "; user_token=" + token
+	}
+	return cookie
+}
+func (c *Config) entranceHeaders(referer, token string) http.Header {
+	h := http.Header{}
+	values := map[string]string{"Accept": "application/json, text/plain, */*", "Content-Type": "application/json", "Accept-Language": "ru", "Origin": c.EntranceURL, "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Dest": "empty", "User-Agent": fmt.Sprintf("Mozilla/5.0 (iPhone; CPU iPhone OS %s like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148", strings.ReplaceAll(c.App.PlatformVer, ".", "_")), "Referer": referer, "Cookie": c.entranceCookie(token)}
+	for k, v := range values {
+		h.Set(k, v)
+	}
+	return h
+}
+func getUserToken(resp *http.Response) string {
+	for _, cookie := range resp.Cookies() {
+		if cookie.Name == "user_token" {
+			return cookie.Value
+		}
+	}
+	return ""
+}
+
+func (a *App) initLogin(ctx context.Context) (map[string]any, error) {
+	a.mu.Lock()
+	for id, flow := range a.flows {
+		if time.Since(flow.Created) > 10*time.Minute {
+			delete(a.flows, id)
+		}
+	}
+	count := len(a.flows)
+	a.mu.Unlock()
+	if count >= 100 {
+		return nil, errors.New("too many active SMS logins")
+	}
+	c := a.Cfg
+	p := c.App
+	d := c.Device
+	referer := fmt.Sprintf("%s/process/entrance/?auth=2&appBuild=%s&appVersion=%s&platformVersion=%s&platformType=IOS&deviceBrand=%s&deviceModel=%s&deviceId=%s&installId=%s&frontCameraAvailable=true&sf=registration&pc=KPEntrance&noPass=0", c.EntranceURL, p.Build, p.Version, p.PlatformVer, p.Brand, p.Model, d.DeviceID, d.InstallID)
+	payload := map[string]any{"data": map[string]any{}, "Data": map[string]any{"auth": "2", "appBuild": p.Build, "appVersion": p.Version, "platformVersion": p.PlatformVer, "platformType": "IOS", "deviceBrand": p.Brand, "deviceModel": p.Model, "deviceId": d.DeviceID, "installId": d.InstallID, "frontCameraAvailable": "true", "sf": "registration", "pc": "KPEntrance", "noPass": "0"}, "actType": "Success"}
+	body, _ := json.Marshal(payload)
+	result, resp, err := a.kaspiRequest(ctx, "POST", c.EntranceURL+"/api/v1/entrance/step", c.entranceHeaders(referer, ""), body)
+	if err != nil {
+		return nil, err
+	}
+	processID := stringValue(field(result, "meta", "pId"))
+	if processID != "" {
+		a.mu.Lock()
+		a.flows[processID] = &authFlow{ProcessID: processID, UserToken: getUserToken(resp), Created: time.Now()}
+		a.mu.Unlock()
+	}
+	return map[string]any{"success": processID != "", "processId": processID, "view": field(result, "view", "code"), "body": result}, nil
+}
+func (a *App) getFlow(id string) (*authFlow, error) {
+	a.mu.RLock()
+	flow := a.flows[id]
+	a.mu.RUnlock()
+	if flow == nil || time.Since(flow.Created) > 10*time.Minute {
+		return nil, errors.New("unknown or expired processId; start login again")
+	}
+	return flow, nil
+}
+func (a *App) authStep(ctx context.Context, flow *authFlow, data map[string]any, sn string) (map[string]any, error) {
+	c := a.Cfg
+	referer := c.EntranceURL + "/process/universal-enter-phone-number?pId=" + flow.ProcessID + "&firstPage=KPUniversalEnterPhoneNumber"
+	payload := map[string]any{"meta": map[string]any{"pId": flow.ProcessID, "sn": sn}, "data": data, "actType": "Success"}
+	body, _ := json.Marshal(payload)
+	result, resp, err := a.kaspiRequest(ctx, "POST", c.EntranceURL+"/api/v1/entrance/step", c.entranceHeaders(referer, flow.UserToken), body)
+	if err != nil {
+		return nil, err
+	}
+	if token := getUserToken(resp); token != "" {
+		flow.UserToken = token
+	}
+	return result, nil
+}
+func (a *App) sendPhone(ctx context.Context, id, phone string) (map[string]any, error) {
+	flow, err := a.getFlow(id)
+	if err != nil {
+		return nil, err
+	}
+	flow.Phone = phone
+	result, err := a.authStep(ctx, flow, map[string]any{"phoneNumber": phone}, "EnterPhoneNumber")
+	if err != nil {
+		return nil, err
+	}
+	sent := stringValue(field(result, "view", "code")) == "EnterOtp"
+	reason := obj(field(result, "view", "onOpenAlarm", "error"))
+	if len(reason) == 0 {
+		reason = obj(result["error"])
+	}
+	if len(reason) == 0 {
+		reason = obj(field(result, "data", "error"))
+	}
+	message := stringValue(reason["label"])
+	if message == "" {
+		message = stringValue(reason["desc"])
+	}
+	if message == "" {
+		message = stringValue(field(result, "data", "desc"))
+	}
+	return map[string]any{"success": sent, "processId": id, "desc": field(result, "data", "desc"), "view": field(result, "view", "code"), "errorCode": reason["code"], "errorMessage": message, "body": result}, nil
+}
+func (a *App) verifyOTP(ctx context.Context, id, otp string) (map[string]any, error) {
+	flow, err := a.getFlow(id)
+	if err != nil {
+		return nil, err
+	}
+	result, err := a.authStep(ctx, flow, map[string]any{"userOtp": otp, "inputType": "auto"}, "ViewEnterOtp")
+	if err != nil {
+		return nil, err
+	}
+	if stringValue(field(result, "data", "type")) != "kpDeviceRegistration" && stringValue(field(result, "view", "code")) != "KPMobileCall" {
+		return map[string]any{"success": false, "processId": id, "step": "otp_response", "body": result}, nil
+	}
+	connected, err := a.finishLogin(ctx, flow)
+	if err != nil {
+		return nil, err
+	}
+	a.mu.Lock()
+	delete(a.flows, id)
+	a.mu.Unlock()
+	return map[string]any{"success": true, "processId": id, "step": "finished", "message": "OTP verified and finish completed", "profileId": connected.ProfileID, "organizationId": connected.OrganizationID, "orgName": connected.OrgName, "phone": connected.Phone}, nil
+}
+func (a *App) finishLogin(ctx context.Context, flow *authFlow) (*KaspiSession, error) {
+	c := a.Cfg
+	p := c.App
+	d := c.Device
+	ecdhKey, x509B64, err := ecdhStart()
+	if err != nil {
+		return nil, err
+	}
+	signedData := map[string]any{"installId": d.InstallID, "time": nowISO(), "auth": []any{map[string]any{"value": "", "type": "pincode"}}, "userIdHash": ""}
+	signedJSON, _ := json.Marshal(signedData)
+	signedB64 := base64.StdEncoding.EncodeToString(signedJSON)
+	signed, err := ecSign(c.PrivateKey, []byte(signedB64))
+	if err != nil {
+		return nil, err
+	}
+	finishURL := c.EntranceURL + "/api/v1/kpentrance/finish"
+	xsh := "url,X-Time-Zone,X-Request-ID,X-Net-Type,X-Emulator,X-Call,X-Platform-Type,X-Locale,X-Time,X-SV"
+	headers := map[string]string{"Content-Type": "application/json", "Accept": "*/*", "Accept-Language": "ru", "User-Agent": c.nativeUA(), "X-Time": nowISO(), "X-Call": "notConnected", "X-Platform-Type": p.Platform, "X-PkTag": d.PKTag, "X-SU": md5Hex(strings.ToLower(finishURL)), "X-Net-Type": "WIFI/ETHERNET", "X-Emulator": "0", "X-Locale": p.Locale, "X-SV": "2", "X-Request-ID": uuid(), "X-Time-Zone": "GMT+05:00", "X-SH": xsh}
+	payload := map[string]any{"signed": map[string]any{"sign": signed, "data": signedB64}, "guard": map[string]any{"pinHash": d.PinHash, "x509": x509B64}, "processId": flow.ProcessID}
+	body, _ := json.Marshal(payload)
+	headers["X-Sign"], err = xSign(c.PrivateKey, finishURL, headers, xsh, string(body))
+	if err != nil {
+		return nil, err
+	}
+	h := http.Header{}
+	for k, v := range headers {
+		h.Set(k, v)
+	}
+	result, _, err := a.kaspiRequest(ctx, "POST", finishURL, h, body)
+	if err != nil {
+		return nil, err
+	}
+	if result["success"] != true {
+		return nil, errors.New("Kaspi finish rejected the login")
+	}
+	tokenSN := stringValue(field(result, "data", "tokenSN"))
+	remoteX509 := stringValue(field(result, "data", "x509"))
+	if tokenSN == "" || remoteX509 == "" {
+		return nil, errors.New("Kaspi did not return a secure session")
+	}
+	secret, err := ecdhFinish(ecdhKey, remoteX509)
+	if err != nil {
+		return nil, err
+	}
+	session := &KaspiSession{TokenSN: tokenSN, Secret: secret, Phone: flow.Phone}
+	if err := a.fetchOrganization(ctx, session); err != nil {
+		return nil, err
+	}
+	if err := a.saveSession(session); err != nil {
+		return nil, err
+	}
+	return session, nil
+}
+func (a *App) fetchOrganization(ctx context.Context, s *KaspiSession) error {
+	c := a.Cfg
+	p := c.App
+	d := c.Device
+	url := c.MTokenURL + "/v08/organizations/org-context-otp"
+	xsh := "url,X-Kb-Client-Ip,X-Time,X-App-Ver,X-SV,X-Locale,X-App-Bld,X-Install-ID,X-Kb-TokenSn,X-S,X-Kb-TokenSnMac,X-Call"
+	headers := map[string]string{"Content-Type": "application/json", "Accept": "*/*", "Accept-Language": "ru", "User-Agent": c.nativeUA(), "X-Kb-TokenSn": s.TokenSN, "X-Kb-TokenSnMac": tokenMac(s.TokenSN, s.Secret, time.Now()), "X-Install-ID": d.InstallID, "X-App-Ver": p.Version, "X-App-Bld": p.Build, "X-Locale": p.Locale, "X-Call": "notConnected", "X-Time": nowISO(), "X-S": "R:0|E:0|RH:0|N:0", "X-SV": "2", "X-Kb-Client-Ip": "192.168.1.96", "X-PkTag": d.PKTag, "X-SU": md5Hex(strings.ToLower(url)), "X-SH": xsh, "X-Request-ID": uuid()}
+	info := map[string]any{"SdkVersion": "AOTP service", "DeviceId": d.DeviceID, "ApplicationId": "kz.kaspi.business", "ScreenWidth": p.ScreenW, "Model": p.Model, "ScreenHeight": p.ScreenH, "DeviceName": p.DeviceName, "VersionName": p.Version, "BuildRelease": p.Platform + " " + p.PlatformVer, "Brand": p.Brand, "Board": p.PlatformVer, "Platform": p.Platform, "Product": "Kaspi Pay", "frontCameraAvailable": true, "VersionCode": p.Build, "InstallId": d.InstallID}
+	body, _ := json.Marshal(map[string]any{"DeviceInformation": info, "OrganizationId": 0})
+	sign, err := xSign(c.PrivateKey, url, headers, xsh, string(body))
+	if err != nil {
+		return err
+	}
+	headers["X-Sign"] = sign
+	h := http.Header{}
+	for k, v := range headers {
+		h.Set(k, v)
+	}
+	result, _, err := a.kaspiRequest(ctx, "POST", url, h, body)
+	if err != nil {
+		return err
+	}
+	current := obj(field(result, "Data", "Current"))
+	s.ProfileID = stringValue(current["ProfileId"])
+	if s.ProfileID == "" {
+		return errors.New("Kaspi did not return an organization profile")
+	}
+	s.OrgName = stringValue(current["OrganizationName"])
+	s.OrganizationID = stringValue(current["OrganizationId"])
+	if phone := stringValue(field(result, "Data", "PhoneNumber")); phone != "" {
+		s.Phone = phone
+	}
+	return nil
+}
