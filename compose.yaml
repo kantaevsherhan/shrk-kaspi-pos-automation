@@ -1,0 +1,15 @@
+services:
+  kaspi-pos:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      HOST: 0.0.0.0
+      STATE_DIR: /data
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - kaspi_data:/data
+
+volumes:
+  kaspi_data:

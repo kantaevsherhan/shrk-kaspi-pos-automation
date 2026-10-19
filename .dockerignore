@@ -1,0 +1,12 @@
+.git
+node_modules
+.env
+data
+*.sqlite*
+keypair.json
+device.json
+ecdh-keypair.json
+tracked-payments.json
+webhook-retries.json
+webhooks.json
+logs
