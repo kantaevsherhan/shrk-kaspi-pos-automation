@@ -61,7 +61,7 @@ func TestConfigurationRejectsInvalidSecretsAndMonitorSettings(t *testing.T) {
 			t.Setenv("TELEGRAM_BOT_TOKEN", "")
 			t.Setenv("TELEGRAM_CHAT_ID", "")
 			t.Setenv("SESSION_CHECK_INTERVAL", "2m")
-			t.Setenv("INVOICE_SEND_INTERVAL", "3.5s")
+			t.Setenv("INVOICE_SEND_INTERVAL", "7s")
 			t.Setenv(tc.key, tc.value)
 			if _, err := LoadConfig(); err == nil {
 				t.Fatal("invalid config accepted")
@@ -74,7 +74,7 @@ func TestInvoiceIntervalConfiguration(t *testing.T) {
 	for _, tc := range []struct {
 		value string
 		want  time.Duration
-	}{{"", 3500 * time.Millisecond}, {"0s", 0}, {"5s", 5 * time.Second}} {
+	}{{"", 7 * time.Second}, {"0s", 0}, {"5s", 5 * time.Second}} {
 		t.Run(tc.value, func(t *testing.T) {
 			t.Setenv("TOKEN_SECRET_KEY", strings.Repeat("11", 32))
 			t.Setenv("SERVICE_API_KEYS", `{"service":"abcdefghijklmnopqrstuvwxyz1234567890"}`)

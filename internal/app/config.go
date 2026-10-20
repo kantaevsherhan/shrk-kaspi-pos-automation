@@ -111,7 +111,7 @@ func LoadConfig() (*Config, error) {
 	if err != nil || c.SessionCheckInterval < 30*time.Second || c.SessionCheckInterval > time.Hour {
 		return nil, errors.New("SESSION_CHECK_INTERVAL must be between 30s and 1h")
 	}
-	c.InvoiceSendInterval, err = time.ParseDuration(env("INVOICE_SEND_INTERVAL", "3.5s"))
+	c.InvoiceSendInterval, err = time.ParseDuration(env("INVOICE_SEND_INTERVAL", "7s"))
 	if err != nil || c.InvoiceSendInterval < 0 || c.InvoiceSendInterval > time.Minute {
 		return nil, errors.New("INVOICE_SEND_INTERVAL must be between 0s and 1m")
 	}
