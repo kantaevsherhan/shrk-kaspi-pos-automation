@@ -58,7 +58,7 @@ func TestBrowserSmokeServer(t *testing.T) {
 			}
 			data = map[string]any{"Status": status}
 		case "/v02/history/operations":
-			data = map[string]any{"Statistic": map[string]any{"SalesCount": 1, "SalesAmount": 2500}, "DailySets": []any{map[string]any{"Date": "2026-10-20", "Operations": []any{map[string]any{"Id": 789, "Amount": 2500, "OperationMethod": 2, "OperationType": 0, "Status": "Processed", "ClientName": "Тестовый клиент"}}}}}
+			data = map[string]any{"Statistic": map[string]any{"SalesCount": 1, "SalesAmount": "2 500 ₸"}, "DailySets": []any{map[string]any{"Date": "2026-10-20", "Operations": []any{map[string]any{"Id": 789, "Amount": "2 500 ₸", "OperationMethod": 2, "OperationType": 0, "Status": "Processed", "ClientName": "Тестовый клиент"}}}}}
 		case "/v01/kaspi-qr/operations/details":
 			data = map[string]any{"QrOperationId": 456, "Amount": 2500, "AvailableReturnAmount": 1500, "ClientName": "Тестовый клиент", "Status": "Processed", "DynamicDetails": []any{map[string]any{"Order": 1, "Title": "Номер заказа", "Data": "Тест-42"}}, "Returns": []any{map[string]any{"Date": "2026-10-19", "Amount": 1000}}}
 		case "/v01/kaspi-qr/history-pos-return":

@@ -22,7 +22,7 @@ func TestSessionMonitorTelegramTransitions(t *testing.T) {
 		mu.Lock()
 		current := mode
 		mu.Unlock()
-		if r.URL.Path != "/v02/history/operations" {
+		if r.URL.Path != "/v01/remote/history" {
 			t.Errorf("unexpected Kaspi path: %s", r.URL.Path)
 		}
 		if current == "bad" {

@@ -148,8 +148,8 @@ func TestPollingExpiryProfilesAndUpstreamErrors(t *testing.T) {
 		a.session = &KaspiSession{ProfileID: "new-profile"}
 		a.track(&TrackedPayment{ID: "123", Type: "invoice", ProfileID: "old-profile"})
 		a.pollOnce(context.Background())
-		if len(a.activePayments()) != 0 {
-			t.Fatal("payment from another account was still polled")
+		if len(a.activePayments()) != 1 || a.activePayments()[0].RetryCount != 0 {
+			t.Fatal("payment from another account was queried or discarded")
 		}
 	})
 	t.Run("error response cannot finalize payment", func(t *testing.T) {

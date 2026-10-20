@@ -13,6 +13,7 @@ func validAmount(n float64) bool {
 	return !math.IsNaN(n) && !math.IsInf(n, 0) && n > 0 && n <= 1000000000
 }
 func (a *App) createInvoice(ctx context.Context, s *KaspiSession, phone string, amount float64, comment string) (map[string]any, error) {
+	phone = normalizePhone(phone)
 	if !clientPhone(phone) || !validAmount(amount) {
 		return nil, errors.New("valid phoneNumber and positive amount required")
 	}
@@ -79,6 +80,7 @@ func (a *App) qrStatus(ctx context.Context, s *KaspiSession, id string) (map[str
 	return a.qrRequest(ctx, "GET", query("/v02/kaspi-qr/status", "qrOperationId", id), s, nil)
 }
 func (a *App) clientInfo(ctx context.Context, s *KaspiSession, phone string) (map[string]any, error) {
+	phone = normalizePhone(phone)
 	if !clientPhone(phone) {
 		return nil, errors.New("valid phoneNumber required")
 	}
@@ -90,14 +92,47 @@ func (a *App) cancelInvoice(ctx context.Context, s *KaspiSession, id string) (ma
 	}
 	return a.qrRequest(ctx, "POST", "/v01/remote/cancel", s, map[string]any{"qrOperationId": jsonNumber(id)})
 }
-func (a *App) invoiceHistory(ctx context.Context, s *KaspiSession) (map[string]any, error) {
-	return a.qrRequest(ctx, "POST", "/v01/remote/history", s, map[string]any{"MaxResult": 20})
+func (a *App) invoiceHistory(ctx context.Context, s *KaspiSession, maxResults ...int) (map[string]any, error) {
+	limit := 20
+	if len(maxResults) > 0 {
+		limit = maxResults[0]
+	}
+	if limit < 1 || limit > 1000 {
+		return nil, errors.New("maxResult must be between 1 and 1000")
+	}
+	return a.qrRequest(ctx, "POST", "/v01/remote/history", s, map[string]any{"MaxResult": limit})
 }
+
+type operationFilter struct {
+	StartDate   string `json:"startDate"`
+	EndDate     string `json:"endDate"`
+	LastDate    string `json:"lastTransactionDate"`
+	Period      int    `json:"statementPeriodCode"`
+	PageSize    *int   `json:"pageSize"`
+	PaymentType *int   `json:"paymentType"`
+}
+
 func (a *App) operations(ctx context.Context, s *KaspiSession, endDate, lastDate string, period int) (map[string]any, error) {
-	if endDate == "" {
+	return a.filteredOperations(ctx, s, operationFilter{EndDate: endDate, LastDate: lastDate, Period: period})
+}
+func (a *App) filteredOperations(ctx context.Context, s *KaspiSession, filter operationFilter) (map[string]any, error) {
+	if filter.EndDate == "" {
 		return nil, errors.New("endDate required")
 	}
-	return a.qrRequest(ctx, "POST", "/v02/history/operations", s, map[string]any{"EndDate": endDate, "LastTransactionDate": lastDate, "StatementPeriodCode": period})
+	if filter.PageSize != nil && (*filter.PageSize < 1 || *filter.PageSize > 1000) {
+		return nil, errors.New("pageSize must be between 1 and 1000")
+	}
+	body := map[string]any{"EndDate": filter.EndDate, "LastTransactionDate": filter.LastDate, "StatementPeriodCode": filter.Period}
+	if filter.StartDate != "" {
+		body["StartDate"] = filter.StartDate
+	}
+	if filter.PageSize != nil {
+		body["PageSize"] = *filter.PageSize
+	}
+	if filter.PaymentType != nil {
+		body["PaymentType"] = *filter.PaymentType
+	}
+	return a.qrRequest(ctx, "POST", "/v02/history/operations", s, body)
 }
 func (a *App) operationDetails(ctx context.Context, s *KaspiSession, id string, method int) (map[string]any, error) {
 	if !safeID(id) {
@@ -119,7 +154,9 @@ func jsonNumber(raw string) any {
 	return json.Number(value)
 }
 func (a *App) checkSession(ctx context.Context, s *KaspiSession) (bool, map[string]any, error) {
-	result, err := a.operations(ctx, s, time.Now().In(time.FixedZone("KZT", 5*3600)).Format("2006-01-02")+"T23:59:59.000+0500", "", 0)
+	// The working Kaspi integration probes remote history, never client-info:
+	// client lookup can succeed even when invoices cannot be created.
+	result, err := a.invoiceHistory(ctx, s, 1)
 	if err != nil {
 		return false, nil, err
 	}

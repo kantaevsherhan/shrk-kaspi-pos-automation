@@ -36,6 +36,7 @@ type TrackedPayment struct {
 	ExpireDate  string    `json:"expireDate,omitempty"`
 	Created     time.Time `json:"createdAt"`
 	RetryCount  int       `json:"retryCount"`
+	NextCheck   time.Time `json:"nextCheck,omitempty"`
 	ProfileID   string    `json:"profileId,omitempty"`
 }
 type Webhook struct {

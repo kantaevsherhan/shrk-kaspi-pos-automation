@@ -50,11 +50,12 @@ func (a *App) pollOnce(ctx context.Context) {
 			}
 		}
 		session, version := a.sessionSnapshot()
-		if session == nil {
+		if session == nil || time.Now().Before(entry.NextCheck) {
 			continue
 		}
 		if entry.ProfileID != "" && entry.ProfileID != session.ProfileID {
-			a.finishPayment(entry, "payment.lost", map[string]any{"Status": "SessionChanged", "StatusDesc": "Подключена другая организация; статус платежа неизвестен"})
+			// Keep the pending payment for when its own organization reconnects.
+			// A different account cannot establish whether it was paid.
 			continue
 		}
 		var result map[string]any
@@ -73,10 +74,6 @@ func (a *App) pollOnce(ctx context.Context) {
 		if err != nil {
 			log.Printf("payment status query failed for %s: %v", entry.ID, err)
 		}
-		if numberValue(result["StatusCode"]) == -101001 {
-			a.finishPayment(entry, "payment.lost", map[string]any{"Status": "SessionExpired"})
-			continue
-		}
 		data := obj(result["Data"])
 		status := ""
 		if kaspiOK(result) {
@@ -89,17 +86,17 @@ func (a *App) pollOnce(ctx context.Context) {
 			continue
 		}
 		if status == "" {
-			current.RetryCount++
-			retries := current.RetryCount
+			// A network/auth failure does not establish a payment result. Retain
+			// pending IDs across outages/restarts and resume details checks later.
+			current.RetryCount = min(current.RetryCount+1, 7)
+			delay := min(3*time.Second*time.Duration(1<<uint(current.RetryCount-1)), 2*time.Minute)
+			current.NextCheck = time.Now().Add(delay)
 			a.mu.Unlock()
-			if retries > 10 {
-				a.finishPayment(entry, "payment.lost", map[string]any{"Status": "PollingFailed"})
-			} else {
-				_ = a.saveTracked()
-			}
+			_ = a.saveTracked()
 			continue
 		}
 		current.RetryCount = 0
+		current.NextCheck = time.Time{}
 		current.Status = status
 		a.mu.Unlock()
 		_ = a.saveTracked()

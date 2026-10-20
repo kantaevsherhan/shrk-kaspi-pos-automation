@@ -98,15 +98,7 @@ const dynamicDetails = computed(() =>
 );
 const availableReturnAmount = computed(() => {
   const raw = selectedDetail.value?.AvailableReturnAmount;
-  if (raw == null) return 0;
-  return (
-    Number(
-      String(raw)
-        .replace(/\s/g, '')
-        .replace(',', '.')
-        .replace(/[^\d.-]/g, ''),
-    ) || 0
-  );
+  return parseMoney(raw);
 });
 function receiptURL(value) {
   try {
@@ -126,7 +118,15 @@ const nav = [
   { id: 'settings', label: 'Подключение', icon: Settings2 },
 ];
 const current = computed(() => nav.find((x) => x.id === page.value));
-const money = (value) => new Intl.NumberFormat('ru-KZ', { maximumFractionDigits: 2 }).format(Number(value || 0)) + ' ₸';
+function parseMoney(value) {
+  const amount = Number(
+    String(value ?? '')
+      .replace(/\s|₸/g, '')
+      .replace(',', '.'),
+  );
+  return Number.isFinite(amount) ? amount : 0;
+}
+const money = (value) => new Intl.NumberFormat('ru-KZ', { maximumFractionDigits: 2 }).format(parseMoney(value)) + ' ₸';
 const statusText = (status) =>
   ({
     Processed: 'Оплачено',
@@ -155,7 +155,7 @@ const filteredRows = computed(() =>
   allRows.value.filter((x) => !search.value || JSON.stringify(x).toLowerCase().includes(search.value.toLowerCase())),
 );
 const paidCount = computed(() => Number(salesStats.value.SalesCount || 0));
-const paidSum = computed(() => Number(salesStats.value.SalesAmount || 0));
+const paidSum = computed(() => parseMoney(salesStats.value.SalesAmount));
 const kaspiEndDate = () => {
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Asia/Almaty',
@@ -189,6 +189,14 @@ async function api(path, options = {}) {
   return data;
 }
 const post = (path, data = {}) => api(path, { method: 'POST', body: JSON.stringify(data) });
+function normalizePhone(value) {
+  let result = value
+    .trim()
+    .replace(/[ ()-]/g, '')
+    .replace(/^\+/, '');
+  if (/^8\d{10}$/.test(result)) result = `7${result.slice(1)}`;
+  return result;
+}
 function kaspiData(data) {
   if (typeof data.StatusCode !== 'number' || data.StatusCode !== 0)
     throw new Error(data.Message || data.StatusDesc || `Kaspi: ${data.StatusCode}`);
@@ -310,7 +318,7 @@ function changePage(id) {
   if (id === 'settings') loadMonitor().catch(report);
 }
 async function createInvoice() {
-  if (!/^\d{10,11}$/.test(invoice.value.phoneNumber) || Number(invoice.value.amount) <= 0) {
+  if (!/^\d{10,11}$/.test(normalizePhone(invoice.value.phoneNumber)) || Number(invoice.value.amount) <= 0) {
     ElMessage.warning('Введите телефон и сумму');
     return;
   }
@@ -331,7 +339,7 @@ async function createInvoice() {
   }
 }
 async function lookupClient() {
-  if (!/^\d{10,11}$/.test(invoice.value.phoneNumber)) {
+  if (!/^\d{10,11}$/.test(normalizePhone(invoice.value.phoneNumber))) {
     ElMessage.warning('Введите телефон клиента');
     return;
   }
@@ -842,9 +850,9 @@ onUnmounted(() => {
                     v-model="invoice.phoneNumber"
                     size="large"
                     placeholder="7XXXXXXXXXX"
-                    maxlength="11"
+                    maxlength="32"
                     @input="clientInfo = null"
-                  /><span class="field-help">Номер в формате 7XXXXXXXXXX</span>
+                  /><span class="field-help">Можно вставить +7 (XXX) XXX-XX-XX или 8XXXXXXXXXX</span>
                   <el-button text :loading="busy" @click="lookupClient">Проверить клиента</el-button>
                   <p v-if="clientInfo" class="field-help">
                     {{ clientInfo.ClientName || 'Клиент найден' }} {{ clientInfo.ClientStatus || '' }}
@@ -1051,7 +1059,11 @@ onUnmounted(() => {
               </div>
             </section></template
           >
-          <el-dialog :model-value="!!selectedRow" title="Детали операции" width="min(480px, calc(100vw - 24px))" @close="selectedRow = null"
+          <el-dialog
+            :model-value="!!selectedRow"
+            title="Детали операции"
+            width="min(480px, calc(100vw - 24px))"
+            @close="selectedRow = null"
             ><template v-if="selectedRow"
               ><div class="detail-line">
                 <span>ID</span><b>{{ selectedRow.QrOperationId || selectedRow.Id || '—' }}</b>
@@ -1195,7 +1207,7 @@ onUnmounted(() => {
                   </div>
                   <div v-else-if="authStep === 1" class="form-fields">
                     <label class="field-label">Телефон Kaspi Pay</label
-                    ><el-input v-model="phone" size="large" placeholder="7XXXXXXXXXX" maxlength="11" /><el-button
+                    ><el-input v-model="phone" size="large" placeholder="+7 (XXX) XXX-XX-XX" maxlength="32" /><el-button
                       type="primary"
                       size="large"
                       class="wide submit"

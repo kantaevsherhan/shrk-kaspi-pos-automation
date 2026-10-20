@@ -109,7 +109,16 @@ func kaspiOK(m map[string]any) bool {
 	}
 }
 func query(path, key, value string) string { return path + "?" + key + "=" + url.QueryEscape(value) }
+func normalizePhone(raw string) string {
+	phone := strings.NewReplacer(" ", "", "-", "", "(", "", ")", "").Replace(strings.TrimSpace(raw))
+	phone = strings.TrimPrefix(phone, "+")
+	if len(phone) == 11 && phone[0] == '8' {
+		phone = "7" + phone[1:]
+	}
+	return phone
+}
 func clientPhone(raw string) bool {
+	raw = normalizePhone(raw)
 	if len(raw) != 10 && len(raw) != 11 {
 		return false
 	}

@@ -97,6 +97,7 @@ func (a *App) authStep(ctx context.Context, flow *authFlow, data map[string]any,
 	return result, nil
 }
 func (a *App) sendPhone(ctx context.Context, id, phone string) (map[string]any, error) {
+	phone = normalizePhone(phone)
 	flow, err := a.getFlow(id)
 	if err != nil {
 		return nil, err

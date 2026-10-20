@@ -305,7 +305,14 @@ func (a *App) Handler() http.Handler {
 		call(w, result, err)
 	})
 	api("POST", "/api/invoice/history", true, func(w http.ResponseWriter, r *http.Request, s *KaspiSession) {
-		result, err := a.invoiceHistory(r.Context(), s)
+		x := struct {
+			MaxResult int `json:"maxResult"`
+		}{MaxResult: 20}
+		if err := decode(r, &x); (err != nil && !errors.Is(err, io.EOF)) || x.MaxResult < 1 || x.MaxResult > 1000 {
+			fail(w, 400, "maxResult must be between 1 and 1000")
+			return
+		}
+		result, err := a.invoiceHistory(r.Context(), s, x.MaxResult)
 		call(w, result, err)
 	})
 	api("POST", "/api/qr/create", true, func(w http.ResponseWriter, r *http.Request, s *KaspiSession) {
@@ -330,16 +337,12 @@ func (a *App) Handler() http.Handler {
 		call(w, result, err)
 	})
 	api("POST", "/api/history/operations", true, func(w http.ResponseWriter, r *http.Request, s *KaspiSession) {
-		var x struct {
-			EndDate  string `json:"endDate"`
-			LastDate string `json:"lastTransactionDate"`
-			Period   int    `json:"statementPeriodCode"`
-		}
-		if decode(r, &x) != nil || x.EndDate == "" {
-			fail(w, 400, "endDate required")
+		var x operationFilter
+		if decode(r, &x) != nil || x.EndDate == "" || (x.PageSize != nil && (*x.PageSize < 1 || *x.PageSize > 1000)) {
+			fail(w, 400, "endDate required; pageSize must be between 1 and 1000")
 			return
 		}
-		result, err := a.operations(r.Context(), s, x.EndDate, x.LastDate, x.Period)
+		result, err := a.filteredOperations(r.Context(), s, x)
 		call(w, result, err)
 	})
 	api("POST", "/api/history/details", true, func(w http.ResponseWriter, r *http.Request, s *KaspiSession) {
