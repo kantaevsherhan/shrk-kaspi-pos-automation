@@ -24,6 +24,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	service.StartPolling(ctx)
+	service.StartSessionMonitor(ctx)
 	server := &http.Server{Addr: cfg.Host + ":" + cfg.Port, Handler: service.Handler(), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		<-ctx.Done()

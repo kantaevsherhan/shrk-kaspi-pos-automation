@@ -60,6 +60,7 @@ const selectedDetail = ref(null);
 const search = ref('');
 const lastRefresh = ref(null);
 const checkResult = ref('');
+const monitorInfo = ref({ telegramConfigured: false, status: 'unknown', lastChecked: null });
 let qrTimer;
 
 const nav = [
@@ -122,7 +123,13 @@ async function api(path, options = {}) {
     },
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  if (!response.ok) {
+    if (response.status === 401 && data.error === 'Unauthorized') {
+      unlocked.value = false;
+      connected.value = false;
+    }
+    throw new Error(data.error || `HTTP ${response.status}`);
+  }
   return data;
 }
 const post = (path, data = {}) => api(path, { method: 'POST', body: JSON.stringify(data) });
@@ -161,6 +168,7 @@ async function unlock() {
     password.value = '';
     unlocked.value = true;
     await loadSession();
+    await loadMonitor();
     if (connected.value) await refreshAll();
   } catch (error) {
     report(error);
@@ -169,7 +177,11 @@ async function unlock() {
   }
 }
 async function lock() {
-  try { await post('/api/admin/logout'); } catch { /* Clear the local view even if the session expired. */ }
+  try {
+    await post('/api/admin/logout');
+  } catch {
+    /* Clear the local view even if the session expired. */
+  }
   unlocked.value = false;
   connected.value = false;
   page.value = 'overview';
@@ -178,6 +190,20 @@ async function loadSession() {
   const result = await api('/api/auth/session');
   connected.value = result.authenticated;
   account.value = result;
+}
+async function loadMonitor() {
+  monitorInfo.value = await api('/api/admin/monitor');
+}
+async function testTelegram() {
+  busy.value = true;
+  try {
+    await post('/api/admin/notifications/test');
+    ElMessage.success('Тестовое сообщение отправлено');
+  } catch (error) {
+    report(error);
+  } finally {
+    busy.value = false;
+  }
 }
 async function refreshAll() {
   if (!connected.value) return;
@@ -201,6 +227,7 @@ function changePage(id) {
   page.value = id;
   mobileMenu.value = false;
   if (id === 'history' || id === 'overview') refreshAll();
+  if (id === 'settings') loadMonitor().catch(report);
 }
 async function createInvoice() {
   if (!/^\d{10,11}$/.test(invoice.value.phoneNumber) || Number(invoice.value.amount) <= 0) {
@@ -407,8 +434,11 @@ onMounted(async () => {
     username.value = me.username;
     unlocked.value = true;
     await loadSession();
+    await loadMonitor();
     if (connected.value) await refreshAll();
-  } catch { /* A missing browser session returns the user to the login form. */ }
+  } catch {
+    /* A missing browser session returns the user to the login form. */
+  }
 });
 onUnmounted(() => clearInterval(qrTimer));
 </script>
@@ -432,9 +462,22 @@ onUnmounted(() => clearInterval(qrTimer));
       <div class="gate-content">
         <span class="eyebrow">{{ adminConfigured ? 'БЕЗОПАСНЫЙ ВХОД' : 'ПЕРВАЯ НАСТРОЙКА' }}</span>
         <h1>Ваши платежи.<br /><em>Один экран.</em></h1>
-        <p>{{ adminConfigured ? 'Войдите в панель по имени и паролю.' : 'Создайте администратора. Сервисный API-ключ понадобится только один раз.' }}</p>
+        <p>
+          {{
+            adminConfigured
+              ? 'Войдите в панель по имени и паролю.'
+              : 'Создайте администратора. Сервисный API-ключ понадобится только один раз.'
+          }}
+        </p>
         <label v-if="!adminConfigured" class="field-label">Сервисный API-ключ</label>
-        <el-input v-if="!adminConfigured" v-model="setupKey" type="password" show-password placeholder="Ключ из SERVICE_API_KEYS" size="large" />
+        <el-input
+          v-if="!adminConfigured"
+          v-model="setupKey"
+          type="password"
+          show-password
+          placeholder="Ключ из SERVICE_API_KEYS"
+          size="large"
+        />
         <label class="field-label">Имя пользователя</label>
         <el-input v-model="username" autocomplete="username" placeholder="Например, admin" size="large" />
         <label class="field-label">Пароль <small v-if="!adminConfigured">от 12 символов</small></label>
@@ -957,10 +1000,75 @@ onUnmounted(() => clearInterval(qrTimer));
               <section class="panel result-panel">
                 <div class="empty-art"><ShieldCheck :size="46" /></div>
                 <h2>Доступ под контролем</h2>
-                <p>Панель защищена паролем. Сервисные API-ключи продолжают работать для интеграций. Сессия Kaspi хранится на сервере в зашифрованном виде.</p>
+                <p>
+                  Панель защищена паролем. Сервисные API-ключи продолжают работать для интеграций. Сессия Kaspi хранится
+                  на сервере в зашифрованном виде.
+                </p>
                 <button class="text-link" @click="lock">Выйти из панели <ArrowUpRight :size="16" /></button>
-              </section></div
-          ></template>
+              </section>
+            </div>
+            <section class="panel monitor-panel">
+              <div class="panel-header">
+                <div>
+                  <span class="eyebrow">МОНИТОРИНГ</span>
+                  <h2>Уведомления Telegram</h2>
+                </div>
+                <span class="form-ornament violet"><AlertCircle :size="22" /></span>
+              </div>
+              <p class="panel-intro">
+                Сервер регулярно проверяет подключение Kaspi, даже когда панель закрыта. При сбое и восстановлении
+                отправляет сообщение боту.
+              </p>
+              <div class="detail-line">
+                <span>Проверка Kaspi</span
+                ><el-tag
+                  :type="
+                    monitorInfo.status === 'connected'
+                      ? 'success'
+                      : monitorInfo.status === 'disconnected'
+                        ? 'danger'
+                        : 'info'
+                  "
+                  round
+                  >{{
+                    monitorInfo.status === 'connected'
+                      ? 'Подключено'
+                      : monitorInfo.status === 'disconnected'
+                        ? 'Связь потеряна'
+                        : monitorInfo.status === 'not_connected'
+                          ? 'Ожидает подключения'
+                          : 'Проверяется'
+                  }}</el-tag
+                >
+              </div>
+              <p v-if="monitorInfo.status === 'disconnected'" class="field-help">
+                {{
+                  monitorInfo.reason === 'kaspi_rejected'
+                    ? 'Kaspi отклонил сессию. Войдите повторно по SMS.'
+                    : monitorInfo.reason === 'session_missing'
+                      ? 'Сессия Kaspi отсутствует. Подключите аккаунт снова.'
+                      : 'Не удалось связаться с Kaspi. Проверьте сеть.'
+                }}
+              </p>
+              <div class="detail-line">
+                <span>Telegram</span><b>{{ monitorInfo.telegramConfigured ? 'Настроен' : 'Не настроен в .env' }}</b>
+              </div>
+              <div v-if="monitorInfo.intervalSeconds" class="detail-line">
+                <span>Интервал проверки</span><b>{{ monitorInfo.intervalSeconds }} сек</b>
+              </div>
+              <div v-if="monitorInfo.lastChecked" class="detail-line">
+                <span>Последняя проверка</span><b>{{ new Date(monitorInfo.lastChecked).toLocaleString('ru-KZ') }}</b>
+              </div>
+              <div class="settings-actions">
+                <el-button :loading="busy" :disabled="!monitorInfo.telegramConfigured" @click="testTelegram"
+                  ><Send :size="16" /> Отправить тест</el-button
+                ><el-button @click="loadMonitor"><RefreshCw :size="16" /> Обновить</el-button>
+              </div>
+              <p v-if="!monitorInfo.telegramConfigured" class="field-help">
+                Добавьте TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID в .env и перезапустите сервер.
+              </p>
+            </section>
+          </template>
         </template>
       </main>
       <footer class="footer">Kaspi POS Console <span>·</span> Данные операций предоставлены Kaspi Pay</footer>

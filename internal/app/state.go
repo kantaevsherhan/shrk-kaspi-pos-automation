@@ -47,16 +47,20 @@ type webhookRetry struct {
 }
 
 type App struct {
-	Cfg           *Config
-	client        *http.Client
-	mu            sync.RWMutex
-	session       *KaspiSession
-	flows         map[string]*authFlow
-	tracked       map[string]*TrackedPayment
-	retries       []webhookRetry
-	admin         *adminAccount
-	adminSessions map[[32]byte]time.Time
-	loginFailures map[string]loginFailure
+	Cfg             *Config
+	client          *http.Client
+	mu              sync.RWMutex
+	session         *KaspiSession
+	flows           map[string]*authFlow
+	tracked         map[string]*TrackedPayment
+	retries         []webhookRetry
+	admin           *adminAccount
+	adminSessions   map[[32]byte]time.Time
+	loginFailures   map[string]loginFailure
+	monitor         monitorState
+	monitorCheckMu  sync.Mutex
+	monitorFailures int
+	telegramBaseURL string
 }
 
 func New(cfg *Config) (*App, error) {
@@ -65,6 +69,9 @@ func New(cfg *Config) (*App, error) {
 		return nil, err
 	}
 	if err := a.loadSession(); err != nil {
+		return nil, err
+	}
+	if err := a.loadMonitor(); err != nil {
 		return nil, err
 	}
 	if b, err := os.ReadFile(filepath.Join(cfg.StateDir, "tracked-payments.json")); err == nil {
@@ -172,12 +179,18 @@ func (a *App) saveSession(s *KaspiSession) error {
 	}
 	a.mu.Lock()
 	a.session = s
+	a.monitor.EverConnected = true
+	_ = a.saveMonitorLocked()
 	a.mu.Unlock()
 	return nil
 }
 func (a *App) clearSession() error {
 	a.mu.Lock()
+	if a.session != nil {
+		a.monitor.EverConnected = true
+	}
 	a.session = nil
+	_ = a.saveMonitorLocked()
 	a.mu.Unlock()
 	err := os.Remove(a.sessionPath())
 	if errors.Is(err, os.ErrNotExist) {

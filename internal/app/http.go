@@ -138,6 +138,35 @@ func (a *App) Handler() http.Handler {
 		a.endAdminSession(w, r)
 		respond(w, 200, map[string]any{"success": true})
 	})
+	mux.HandleFunc("GET /api/admin/monitor", func(w http.ResponseWriter, r *http.Request) {
+		if !a.adminAuthenticated(r) {
+			fail(w, 401, "Unauthorized")
+			return
+		}
+		a.mu.RLock()
+		state := a.monitor
+		a.mu.RUnlock()
+		respond(w, 200, map[string]any{"telegramConfigured": a.Cfg.TelegramBotToken != "", "status": state.Status, "reason": state.Reason, "lastChecked": state.LastChecked, "intervalSeconds": int(a.Cfg.SessionCheckInterval.Seconds())})
+	})
+	mux.HandleFunc("POST /api/admin/notifications/test", func(w http.ResponseWriter, r *http.Request) {
+		if !a.adminAuthenticated(r) {
+			fail(w, 401, "Unauthorized")
+			return
+		}
+		if !sameOrigin(r) {
+			fail(w, 403, "Origin not allowed")
+			return
+		}
+		if a.Cfg.TelegramBotToken == "" {
+			fail(w, 503, "Telegram is not configured")
+			return
+		}
+		if err := a.sendTelegram(r.Context(), "🔔 Kaspi POS: тестовое уведомление. Мониторинг подключен."); err != nil {
+			fail(w, 502, err.Error())
+			return
+		}
+		respond(w, 200, map[string]any{"success": true})
+	})
 	api := func(method, path string, session bool, fn func(http.ResponseWriter, *http.Request, *KaspiSession)) {
 		mux.HandleFunc(method+" "+path, func(w http.ResponseWriter, r *http.Request) {
 			if !a.authorized(r) && !a.adminAuthenticated(r) {
