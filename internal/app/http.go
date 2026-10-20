@@ -48,10 +48,104 @@ func (a *App) authorized(r *http.Request) bool {
 func (a *App) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) { respond(w, 200, map[string]any{"ok": true}) })
+	mux.HandleFunc("GET /api/admin/status", func(w http.ResponseWriter, r *http.Request) {
+		a.mu.RLock()
+		configured := a.admin != nil
+		a.mu.RUnlock()
+		respond(w, 200, map[string]any{"configured": configured})
+	})
+	mux.HandleFunc("POST /api/admin/setup", func(w http.ResponseWriter, r *http.Request) {
+		if !a.authorized(r) {
+			fail(w, 401, "Unauthorized")
+			return
+		}
+		var input struct {
+			Username string `json:"username"`
+			Password string `json:"password"`
+		}
+		if decode(r, &input) != nil {
+			fail(w, 400, "Invalid request")
+			return
+		}
+		if err := a.createAdmin(input.Username, input.Password); err != nil {
+			if err.Error() == "administrator already configured" {
+				fail(w, 409, err.Error())
+			} else if !validUsername(input.Username) || len(input.Password) < 12 || len(input.Password) > 256 {
+				fail(w, 400, "Username must be 3-64 letters/numbers and password 12-256 characters")
+			} else {
+				fail(w, 500, "Could not save administrator")
+			}
+			return
+		}
+		respond(w, 201, map[string]any{"configured": true})
+	})
+	mux.HandleFunc("POST /api/admin/login", func(w http.ResponseWriter, r *http.Request) {
+		if !sameOrigin(r) {
+			fail(w, 403, "Origin not allowed")
+			return
+		}
+		var input struct {
+			Username string `json:"username"`
+			Password string `json:"password"`
+		}
+		if decode(r, &input) != nil || len(input.Password) > 256 {
+			fail(w, 400, "Invalid request")
+			return
+		}
+		a.mu.RLock()
+		configured := a.admin != nil
+		a.mu.RUnlock()
+		if !configured {
+			fail(w, 503, "Administrator not configured")
+			return
+		}
+		ip := clientIP(r)
+		if !a.loginAllowed(ip) {
+			fail(w, 429, "Too many login attempts; try again later")
+			return
+		}
+		if !a.checkAdmin(input.Username, input.Password) {
+			a.loginFailed(ip)
+			fail(w, 401, "Invalid username or password")
+			return
+		}
+		a.loginSucceeded(ip)
+		if err := a.newAdminSession(w, r); err != nil {
+			fail(w, 500, "Could not create session")
+			return
+		}
+		respond(w, 200, map[string]any{"username": input.Username})
+	})
+	mux.HandleFunc("GET /api/admin/me", func(w http.ResponseWriter, r *http.Request) {
+		if !a.adminAuthenticated(r) {
+			fail(w, 401, "Unauthorized")
+			return
+		}
+		a.mu.RLock()
+		name := a.admin.Username
+		a.mu.RUnlock()
+		respond(w, 200, map[string]any{"username": name})
+	})
+	mux.HandleFunc("POST /api/admin/logout", func(w http.ResponseWriter, r *http.Request) {
+		if !a.adminAuthenticated(r) {
+			fail(w, 401, "Unauthorized")
+			return
+		}
+		if !sameOrigin(r) {
+			fail(w, 403, "Origin not allowed")
+			return
+		}
+		a.endAdminSession(w, r)
+		respond(w, 200, map[string]any{"success": true})
+	})
 	api := func(method, path string, session bool, fn func(http.ResponseWriter, *http.Request, *KaspiSession)) {
 		mux.HandleFunc(method+" "+path, func(w http.ResponseWriter, r *http.Request) {
-			if !a.authorized(r) {
+			if !a.authorized(r) && !a.adminAuthenticated(r) {
 				fail(w, 401, "Unauthorized")
+				return
+			}
+			if method != "GET" && !a.authorized(r) && !sameOrigin(r) {
+				fail(w, 403, "Origin not allowed")
 				return
 			}
 			var s *KaspiSession
@@ -221,7 +315,7 @@ func (a *App) Handler() http.Handler {
 		call(w, result, err)
 	})
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
-		if !a.authorized(r) {
+		if !a.authorized(r) && !a.adminAuthenticated(r) {
 			fail(w, 401, "Unauthorized")
 			return
 		}

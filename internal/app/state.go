@@ -47,17 +47,23 @@ type webhookRetry struct {
 }
 
 type App struct {
-	Cfg     *Config
-	client  *http.Client
-	mu      sync.RWMutex
-	session *KaspiSession
-	flows   map[string]*authFlow
-	tracked map[string]*TrackedPayment
-	retries []webhookRetry
+	Cfg           *Config
+	client        *http.Client
+	mu            sync.RWMutex
+	session       *KaspiSession
+	flows         map[string]*authFlow
+	tracked       map[string]*TrackedPayment
+	retries       []webhookRetry
+	admin         *adminAccount
+	adminSessions map[[32]byte]time.Time
+	loginFailures map[string]loginFailure
 }
 
 func New(cfg *Config) (*App, error) {
-	a := &App{Cfg: cfg, client: &http.Client{Timeout: 15 * time.Second}, flows: map[string]*authFlow{}, tracked: map[string]*TrackedPayment{}}
+	a := &App{Cfg: cfg, client: &http.Client{Timeout: 15 * time.Second}, flows: map[string]*authFlow{}, tracked: map[string]*TrackedPayment{}, adminSessions: map[[32]byte]time.Time{}, loginFailures: map[string]loginFailure{}}
+	if err := a.loadAdmin(); err != nil {
+		return nil, err
+	}
 	if err := a.loadSession(); err != nil {
 		return nil, err
 	}

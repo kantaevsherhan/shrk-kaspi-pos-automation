@@ -29,8 +29,10 @@ import {
   KeyRound,
 } from '@lucide/vue';
 
-const apiKey = ref(sessionStorage.getItem('kaspi_service_key') || '');
-const keyInput = ref('');
+const adminConfigured = ref(true);
+const username = ref('');
+const password = ref('');
+const setupKey = ref('');
 const unlocked = ref(false);
 const connected = ref(false);
 const account = ref({});
@@ -113,8 +115,8 @@ const kaspiEndDate = () => {
 async function api(path, options = {}) {
   const response = await fetch(path, {
     ...options,
+    credentials: 'same-origin',
     headers: {
-      Authorization: `Bearer ${apiKey.value}`,
       ...(options.body ? { 'Content-Type': 'application/json' } : {}),
       ...(options.headers || {}),
     },
@@ -143,24 +145,31 @@ function getRows(data) {
 }
 
 async function unlock() {
-  if (!keyInput.value.trim()) return;
-  apiKey.value = keyInput.value.trim();
+  if (!username.value.trim() || !password.value) return;
+  busy.value = true;
   try {
-    const session = await api('/api/auth/session');
-    sessionStorage.setItem('kaspi_service_key', apiKey.value);
+    if (!adminConfigured.value) {
+      await api('/api/admin/setup', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${setupKey.value.trim()}` },
+        body: JSON.stringify({ username: username.value.trim(), password: password.value }),
+      });
+      adminConfigured.value = true;
+      setupKey.value = '';
+    }
+    await post('/api/admin/login', { username: username.value.trim(), password: password.value });
+    password.value = '';
     unlocked.value = true;
-    connected.value = session.authenticated;
-    account.value = session;
+    await loadSession();
     if (connected.value) await refreshAll();
   } catch (error) {
-    apiKey.value = '';
     report(error);
+  } finally {
+    busy.value = false;
   }
 }
-function lock() {
-  sessionStorage.removeItem('kaspi_service_key');
-  apiKey.value = '';
-  keyInput.value = '';
+async function lock() {
+  try { await post('/api/admin/logout'); } catch { /* Clear the local view even if the session expired. */ }
   unlocked.value = false;
   connected.value = false;
   page.value = 'overview';
@@ -390,10 +399,16 @@ function refundFromDetail() {
   changePage('refund');
 }
 onMounted(async () => {
-  if (apiKey.value) {
-    keyInput.value = apiKey.value;
-    await unlock();
-  }
+  try {
+    const status = await api('/api/admin/status');
+    adminConfigured.value = status.configured;
+    if (!status.configured) return;
+    const me = await api('/api/admin/me');
+    username.value = me.username;
+    unlocked.value = true;
+    await loadSession();
+    if (connected.value) await refreshAll();
+  } catch { /* A missing browser session returns the user to the login form. */ }
 });
 onUnmounted(() => clearInterval(qrTimer));
 </script>
@@ -415,22 +430,27 @@ onUnmounted(() => clearInterval(qrTimer));
         ><span>Kaspi POS <b>Console</b></span>
       </div>
       <div class="gate-content">
-        <span class="eyebrow">БЕЗОПАСНЫЙ ВХОД</span>
+        <span class="eyebrow">{{ adminConfigured ? 'БЕЗОПАСНЫЙ ВХОД' : 'ПЕРВАЯ НАСТРОЙКА' }}</span>
         <h1>Ваши платежи.<br /><em>Один экран.</em></h1>
-        <p>Управляйте счетами, QR-оплатами и возвратами из удобной панели.</p>
-        <label class="field-label">Ключ доступа к сервису</label
-        ><el-input
-          v-model="keyInput"
+        <p>{{ adminConfigured ? 'Войдите в панель по имени и паролю.' : 'Создайте администратора. Сервисный API-ключ понадобится только один раз.' }}</p>
+        <label v-if="!adminConfigured" class="field-label">Сервисный API-ключ</label>
+        <el-input v-if="!adminConfigured" v-model="setupKey" type="password" show-password placeholder="Ключ из SERVICE_API_KEYS" size="large" />
+        <label class="field-label">Имя пользователя</label>
+        <el-input v-model="username" autocomplete="username" placeholder="Например, admin" size="large" />
+        <label class="field-label">Пароль <small v-if="!adminConfigured">от 12 символов</small></label>
+        <el-input
+          v-model="password"
           type="password"
           show-password
-          placeholder="Введите API-ключ"
+          autocomplete="current-password"
+          placeholder="Введите пароль"
           size="large"
           @keyup.enter="unlock"
           ><template #prefix><KeyRound :size="17" /></template></el-input
-        ><el-button type="primary" size="large" class="wide" @click="unlock"
-          >Войти <ArrowUpRight :size="18"
+        ><el-button type="primary" size="large" class="wide" :loading="busy" @click="unlock"
+          >{{ adminConfigured ? 'Войти' : 'Создать и войти' }} <ArrowUpRight :size="18"
         /></el-button>
-        <div class="gate-note"><ShieldCheck :size="16" /> Ключ проверяется вашим сервером</div>
+        <div class="gate-note"><ShieldCheck :size="16" /> Сессия панели защищена сервером</div>
       </div>
       <div class="gate-footer">Kaspi POS Console · панель управления платежами</div>
     </div>
@@ -937,8 +957,8 @@ onUnmounted(() => clearInterval(qrTimer));
               <section class="panel result-panel">
                 <div class="empty-art"><ShieldCheck :size="46" /></div>
                 <h2>Доступ под контролем</h2>
-                <p>API-ключ ограничивает доступ к сервису. Сессия Kaspi хранится на сервере в зашифрованном виде.</p>
-                <button class="text-link" @click="lock">Сменить ключ доступа <ArrowUpRight :size="16" /></button>
+                <p>Панель защищена паролем. Сервисные API-ключи продолжают работать для интеграций. Сессия Kaspi хранится на сервере в зашифрованном виде.</p>
+                <button class="text-link" @click="lock">Выйти из панели <ArrowUpRight :size="16" /></button>
               </section></div
           ></template>
         </template>
