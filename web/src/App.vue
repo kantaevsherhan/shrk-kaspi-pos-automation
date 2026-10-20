@@ -48,20 +48,74 @@ const invoice = ref({ phoneNumber: '', amount: null, comment: '' });
 const qrAmount = ref(null);
 const refund = ref({ qrOperationId: '', returnAmount: null });
 const createdInvoice = ref(null);
+const createdInvoiceAmount = ref(0);
+const clientInfo = ref(null);
 const createdQR = ref(null);
 const qrImage = ref('');
 const qrStatus = ref('');
+const qrSeconds = ref(0);
+let qrDeadline = 0;
+let qrCountdownTimer;
 const invoiceRows = ref([]);
 const operationRows = ref([]);
 const salesStats = ref({});
 const activePayments = ref([]);
 const selectedRow = ref(null);
 const selectedDetail = ref(null);
+const detailLoading = ref(false);
 const search = ref('');
 const lastRefresh = ref(null);
 const checkResult = ref('');
 const monitorInfo = ref({ telegramConfigured: false, status: 'unknown', lastChecked: null });
 let qrTimer;
+let invoiceTimer;
+let detailRequest = 0;
+
+const finalStatuses = new Set([
+  'Processed',
+  'RemotePaymentCanceled',
+  'RemotePaymentRejected',
+  'Expired',
+  'QrTokenDiscarded',
+  'CancelledByUser',
+  'NotConfirmedByUser',
+  'CancelledByExternalSource',
+  'ProcessingFailed',
+  'Rejected',
+  'InsufficientFunds',
+  'InsufficientFundsError',
+  'Error',
+  'IrisSrcBlockCode1',
+  'IrisSrcBlockCode3',
+  'IrisSrcBlockCode9',
+  'IrisDestBlockCode3',
+  'IrisDestBlockCode5',
+  'IrisDestBlockCode7',
+  'IrisDestBlockCode10',
+]);
+const dynamicDetails = computed(() =>
+  [...(selectedDetail.value?.DynamicDetails || [])].sort((a, b) => a.Order - b.Order),
+);
+const availableReturnAmount = computed(() => {
+  const raw = selectedDetail.value?.AvailableReturnAmount;
+  if (raw == null) return 0;
+  return (
+    Number(
+      String(raw)
+        .replace(/\s/g, '')
+        .replace(',', '.')
+        .replace(/[^\d.-]/g, ''),
+    ) || 0
+  );
+});
+function receiptURL(value) {
+  try {
+    const url = new URL(value);
+    return ['http:', 'https:'].includes(url.protocol) ? url.href : null;
+  } catch {
+    return null;
+  }
+}
 
 const nav = [
   { id: 'overview', label: 'Обзор', icon: LayoutDashboard },
@@ -128,13 +182,15 @@ async function api(path, options = {}) {
       unlocked.value = false;
       connected.value = false;
     }
-    throw new Error(data.error || `HTTP ${response.status}`);
+    const error = new Error(data.error || `HTTP ${response.status}`);
+    error.status = response.status;
+    throw error;
   }
   return data;
 }
 const post = (path, data = {}) => api(path, { method: 'POST', body: JSON.stringify(data) });
 function kaspiData(data) {
-  if (data.StatusCode !== undefined && Number(data.StatusCode) !== 0)
+  if (typeof data.StatusCode !== 'number' || data.StatusCode !== 0)
     throw new Error(data.Message || data.StatusDesc || `Kaspi: ${data.StatusCode}`);
   return data.Data || {};
 }
@@ -179,10 +235,22 @@ async function unlock() {
 async function lock() {
   try {
     await post('/api/admin/logout');
-  } catch {
-    /* Clear the local view even if the session expired. */
+  } catch (error) {
+    if (error.status !== 401) {
+      report(error);
+      return;
+    }
   }
   unlocked.value = false;
+  clearInterval(qrTimer);
+  clearInterval(qrCountdownTimer);
+  clearInterval(invoiceTimer);
+  createdInvoice.value = null;
+  createdQR.value = null;
+  selectedRow.value = null;
+  selectedDetail.value = null;
+  invoiceRows.value = [];
+  operationRows.value = [];
   connected.value = false;
   page.value = 'overview';
 }
@@ -213,10 +281,22 @@ async function refreshAll() {
     post('/api/history/operations', { endDate: kaspiEndDate(), lastTransactionDate: '', statementPeriodCode: 0 }),
     api('/api/payments/active'),
   ]);
-  if (results[0].status === 'fulfilled') invoiceRows.value = getRows(results[0].value);
+  if (results[0].status === 'fulfilled') {
+    try {
+      kaspiData(results[0].value);
+      invoiceRows.value = getRows(results[0].value);
+    } catch (error) {
+      report(error);
+    }
+  }
   if (results[1].status === 'fulfilled') {
-    operationRows.value = getRows(results[1].value);
-    salesStats.value = results[1].value.Data?.Statistic || {};
+    try {
+      kaspiData(results[1].value);
+      operationRows.value = getRows(results[1].value);
+      salesStats.value = results[1].value.Data?.Statistic || {};
+    } catch (error) {
+      report(error);
+    }
   }
   if (results[2].status === 'fulfilled') activePayments.value = results[2].value.items || [];
   if (results.every((x) => x.status === 'rejected')) report(results[0].reason);
@@ -235,9 +315,13 @@ async function createInvoice() {
     return;
   }
   busy.value = true;
+  const submitted = { ...invoice.value };
   try {
-    const result = await post('/api/invoice/create', invoice.value);
+    const result = await post('/api/invoice/create', submitted);
     createdInvoice.value = kaspiData(result);
+    createdInvoiceAmount.value = Number(submitted.amount);
+    clearInterval(invoiceTimer);
+    invoiceTimer = setInterval(refreshCreatedInvoice, 5000);
     ElMessage.success('Счёт создан');
     await refreshAll();
   } catch (error) {
@@ -246,15 +330,50 @@ async function createInvoice() {
     busy.value = false;
   }
 }
+async function lookupClient() {
+  if (!/^\d{10,11}$/.test(invoice.value.phoneNumber)) {
+    ElMessage.warning('Введите телефон клиента');
+    return;
+  }
+  busy.value = true;
+  try {
+    clientInfo.value = kaspiData(
+      await api(`/api/invoice/client-info?phoneNumber=${encodeURIComponent(invoice.value.phoneNumber)}`),
+    );
+  } catch (error) {
+    report(error);
+  } finally {
+    busy.value = false;
+  }
+}
+async function refreshCreatedInvoice() {
+  const id = createdInvoice.value?.QrOperationId || createdInvoice.value?.Id;
+  if (!id || !unlocked.value) return;
+  try {
+    const data = kaspiData(await api(`/api/invoice/details?operationId=${encodeURIComponent(id)}`));
+    if (!unlocked.value || String(id) !== String(createdInvoice.value?.QrOperationId || createdInvoice.value?.Id))
+      return;
+    createdInvoice.value = { ...createdInvoice.value, ...data };
+    if (finalStatuses.has(data.Status)) {
+      clearInterval(invoiceTimer);
+      await refreshAll();
+    }
+  } catch (error) {
+    clearInterval(invoiceTimer);
+    report(error);
+  }
+}
 async function createQR() {
   if (Number(qrAmount.value) <= 0) {
     ElMessage.warning('Введите сумму');
     return;
   }
   busy.value = true;
+  const submittedAmount = Number(qrAmount.value);
   try {
-    const result = await post('/api/qr/create', { amount: Number(qrAmount.value) });
+    const result = await post('/api/qr/create', { amount: submittedAmount });
     createdQR.value = kaspiData(result);
+    createdQR.value.RequestedAmount = submittedAmount;
     if (!createdQR.value.QrOriginalToken) throw new Error('Kaspi не вернул QR-токен');
     qrStatus.value = createdQR.value.Status || 'QrTokenCreated';
     qrImage.value = await QRCode.toDataURL(createdQR.value.QrOriginalToken, {
@@ -263,6 +382,16 @@ async function createQR() {
       color: { dark: '#171b26', light: '#ffffff' },
     });
     ElMessage.success('QR создан');
+    const expiry = Date.parse(createdQR.value.ExpireDate || '');
+    qrDeadline = Number.isFinite(expiry)
+      ? expiry
+      : Date.now() + Number(createdQR.value.QrPaymentBehaviorOptions?.qrCodeScanWaitTimeout || 180) * 1000;
+    clearInterval(qrCountdownTimer);
+    const updateCountdown = () => {
+      qrSeconds.value = Math.max(0, Math.ceil((qrDeadline - Date.now()) / 1000));
+    };
+    updateCountdown();
+    qrCountdownTimer = setInterval(updateCountdown, 1000);
     startQRStatus();
     await refreshAll();
   } catch (error) {
@@ -274,19 +403,27 @@ async function createQR() {
 function startQRStatus() {
   clearInterval(qrTimer);
   if (!createdQR.value?.QrOperationId) return;
-  qrTimer = setInterval(async () => {
-    try {
-      const result = await api(`/api/qr/status?qrOperationId=${encodeURIComponent(createdQR.value.QrOperationId)}`);
-      const next = result.Data?.Status;
-      if (next) qrStatus.value = next;
-      if (['Processed', 'Expired', 'QrTokenDiscarded', 'Rejected', 'CancelledByUser'].includes(next)) {
-        clearInterval(qrTimer);
-        refreshAll();
+  qrTimer = setInterval(
+    async () => {
+      try {
+        const result = await api(`/api/qr/status?qrOperationId=${encodeURIComponent(createdQR.value.QrOperationId)}`);
+        const next = kaspiData(result).Status;
+        if (next === 'QrTokenScanned' && qrStatus.value !== next)
+          qrDeadline =
+            Date.now() + Number(createdQR.value.QrPaymentBehaviorOptions?.paymentConfirmationTimeout || 65) * 1000;
+        if (next) qrStatus.value = next;
+        if (finalStatuses.has(next)) {
+          clearInterval(qrTimer);
+          clearInterval(qrCountdownTimer);
+          refreshAll();
+        }
+      } catch {
+        /* Polling remains available on the server. */
       }
-    } catch {
-      /* Polling remains available on the server. */
-    }
-  }, 3000);
+    },
+    Math.max(1, Math.min(60, Number(createdQR.value.QrPaymentBehaviorOptions?.qrCodeScanEventPollingInterval) || 3)) *
+      1000,
+  );
 }
 async function createRefund() {
   if (!refund.value.qrOperationId || Number(refund.value.returnAmount) <= 0) {
@@ -322,6 +459,8 @@ async function cancelInvoice(row) {
     const result = await post('/api/invoice/cancel', { operationId: String(id) });
     kaspiData(result);
     ElMessage.success('Счёт отменён');
+    if (String(createdInvoice.value?.QrOperationId || createdInvoice.value?.Id) === String(id))
+      await refreshCreatedInvoice();
     await refreshAll();
   } catch (error) {
     if (error !== 'cancel') report(error);
@@ -407,21 +546,27 @@ async function copy(text) {
   }
 }
 async function openDetail(row) {
+  const requestNumber = ++detailRequest;
   selectedRow.value = row;
   selectedDetail.value = null;
+  detailLoading.value = true;
   try {
     const result =
       row.kind === 'Счёт'
         ? await api(`/api/invoice/details?operationId=${encodeURIComponent(row.QrOperationId || row.Id)}`)
         : await post('/api/history/details', { id: String(row.Id), operationMethod: Number(row.OperationMethod || 0) });
-    selectedDetail.value = kaspiData(result);
+    if (requestNumber === detailRequest && selectedRow.value) selectedDetail.value = kaspiData(result);
   } catch (error) {
     report(error);
+  } finally {
+    if (requestNumber === detailRequest) detailLoading.value = false;
   }
 }
 function refundFromDetail() {
-  refund.value.qrOperationId = String(selectedRow.value.QrOperationId || selectedRow.value.Id || '');
-  refund.value.returnAmount = Number(selectedRow.value.Amount || 0);
+  refund.value.qrOperationId = String(
+    selectedDetail.value?.QrOperationId || selectedRow.value.QrOperationId || selectedRow.value.Id || '',
+  );
+  refund.value.returnAmount = availableReturnAmount.value;
   selectedRow.value = null;
   changePage('refund');
 }
@@ -440,7 +585,11 @@ onMounted(async () => {
     /* A missing browser session returns the user to the login form. */
   }
 });
-onUnmounted(() => clearInterval(qrTimer));
+onUnmounted(() => {
+  clearInterval(qrTimer);
+  clearInterval(qrCountdownTimer);
+  clearInterval(invoiceTimer);
+});
 </script>
 
 <template>
@@ -689,10 +838,18 @@ onUnmounted(() => clearInterval(qrTimer));
                 </div>
                 <div class="form-fields">
                   <label class="field-label">Номер телефона клиента</label
-                  ><el-input v-model="invoice.phoneNumber" size="large" placeholder="7XXXXXXXXXX" maxlength="11" /><span
-                    class="field-help"
-                    >Номер в формате 7XXXXXXXXXX</span
-                  ><label class="field-label">Сумма, ₸</label
+                  ><el-input
+                    v-model="invoice.phoneNumber"
+                    size="large"
+                    placeholder="7XXXXXXXXXX"
+                    maxlength="11"
+                    @input="clientInfo = null"
+                  /><span class="field-help">Номер в формате 7XXXXXXXXXX</span>
+                  <el-button text :loading="busy" @click="lookupClient">Проверить клиента</el-button>
+                  <p v-if="clientInfo" class="field-help">
+                    {{ clientInfo.ClientName || 'Клиент найден' }} {{ clientInfo.ClientStatus || '' }}
+                  </p>
+                  <label class="field-label">Сумма, ₸</label
                   ><el-input-number
                     v-model="invoice.amount"
                     :min="1"
@@ -717,17 +874,31 @@ onUnmounted(() => clearInterval(qrTimer));
                 <template v-if="createdInvoice"
                   ><div class="result-success"><CheckCircle2 :size="28" /></div>
                   <span class="eyebrow">СЧЁТ СОЗДАН</span>
-                  <h2>Ожидает оплаты</h2>
+                  <h2>{{ statusText(createdInvoice.Status || 'RemotePaymentCreated') }}</h2>
                   <p>Клиент получит счёт в Kaspi Pay.</p>
                   <div class="detail-line">
                     <span>ID операции</span><b>{{ createdInvoice.QrOperationId || createdInvoice.Id }}</b>
                   </div>
                   <div class="detail-line">
-                    <span>Сумма</span><b>{{ money(invoice.amount) }}</b>
+                    <span>Сумма</span><b>{{ money(createdInvoiceAmount) }}</b>
                   </div>
                   <el-button plain class="wide" @click="copy(createdInvoice.QrOperationId || createdInvoice.Id)"
                     ><Copy :size="16" /> Скопировать ID</el-button
-                  ></template
+                  >
+                  <el-button plain class="wide" @click="refreshCreatedInvoice"
+                    ><RefreshCw :size="16" /> Обновить статус</el-button
+                  >
+                  <el-button plain class="wide" @click="openDetail({ ...createdInvoice, kind: 'Счёт' })"
+                    >Подробнее о счёте</el-button
+                  >
+                  <el-button
+                    v-if="createdInvoice.Status === 'RemotePaymentCreated'"
+                    plain
+                    type="danger"
+                    class="wide"
+                    @click="cancelInvoice(createdInvoice)"
+                    >Отменить счёт</el-button
+                  > </template
                 ><template v-else
                   ><div class="empty-art"><FileText :size="46" /></div>
                   <h2>Новый счёт появится здесь</h2>
@@ -742,7 +913,11 @@ onUnmounted(() => clearInterval(qrTimer));
                   <h2>Последние счета</h2>
                 </div>
               </div>
-              <el-table :data="invoiceRows" v-loading="loading" empty-text="Счета пока не найдены"
+              <el-table
+                :data="invoiceRows"
+                v-loading="loading"
+                empty-text="Счета пока не найдены"
+                @row-click="(row) => openDetail({ ...row, kind: 'Счёт' })"
                 ><el-table-column label="ID" min-width="120"
                   ><template #default="{ row }">#{{ row.QrOperationId || row.Id || '—' }}</template></el-table-column
                 ><el-table-column label="Клиент" min-width="130"
@@ -763,7 +938,7 @@ onUnmounted(() => clearInterval(qrTimer));
                       v-if="row.Status === 'RemotePaymentCreated'"
                       text
                       type="danger"
-                      @click="cancelInvoice(row)"
+                      @click.stop="cancelInvoice(row)"
                       >Отменить</el-button
                     ></template
                   ></el-table-column
@@ -805,9 +980,16 @@ onUnmounted(() => clearInterval(qrTimer));
                 <template v-if="createdQR"
                   ><div class="qr-image"><img :src="qrImage" alt="QR для оплаты Kaspi" /></div>
                   <el-tag :type="statusType(qrStatus)" effect="light" round>{{ statusText(qrStatus) }}</el-tag>
-                  <h2>{{ money(qrAmount) }}</h2>
-                  <small>Операция #{{ createdQR.QrOperationId }}</small
-                  ><el-button plain class="wide" @click="copy(createdQR.QrToken)"
+                  <h2>{{ money(createdQR.Amount || createdQR.PaymentAmount || createdQR.RequestedAmount) }}</h2>
+                  <small>Операция #{{ createdQR.QrOperationId }}</small>
+                  <p v-if="!finalStatuses.has(qrStatus)" class="field-help">
+                    {{
+                      qrSeconds > 0
+                        ? `Осталось ${Math.floor(qrSeconds / 60)}:${String(qrSeconds % 60).padStart(2, '0')}`
+                        : 'Проверяем состояние платежа…'
+                    }}
+                  </p>
+                  <el-button plain class="wide" @click="copy(createdQR.QrToken)"
                     ><Copy :size="16" /> Скопировать ссылку</el-button
                   ></template
                 ><template v-else
@@ -824,6 +1006,9 @@ onUnmounted(() => clearInterval(qrTimer));
                 <div>
                   <span class="eyebrow">ОПЕРАЦИИ KASPI</span>
                   <h2>История платежей</h2>
+                  <p class="field-help">
+                    Продажи: {{ money(salesStats.SalesAmount) }} · Возвраты: {{ money(salesStats.ReturnsAmount) }}
+                  </p>
                 </div>
                 <el-input v-model="search" placeholder="Поиск по истории" clearable class="search-input"
                   ><template #prefix><Search :size="17" /></template
@@ -847,6 +1032,10 @@ onUnmounted(() => clearInterval(qrTimer));
                   ><template #default="{ row }"
                     ><b>{{ money(row.Amount || row.PaymentAmount) }}</b></template
                   ></el-table-column
+                ><el-table-column label="Дата" min-width="150"
+                  ><template #default="{ row }">{{
+                    row.Time || row.OrderRegDate || row.Day || '—'
+                  }}</template></el-table-column
                 ><el-table-column label="Статус" min-width="160"
                   ><template #default="{ row }"
                     ><el-tag :type="statusType(row.Status)" effect="light" round>{{
@@ -862,7 +1051,7 @@ onUnmounted(() => clearInterval(qrTimer));
               </div>
             </section></template
           >
-          <el-dialog :model-value="!!selectedRow" title="Детали операции" width="480px" @close="selectedRow = null"
+          <el-dialog :model-value="!!selectedRow" title="Детали операции" width="min(480px, calc(100vw - 24px))" @close="selectedRow = null"
             ><template v-if="selectedRow"
               ><div class="detail-line">
                 <span>ID</span><b>{{ selectedRow.QrOperationId || selectedRow.Id || '—' }}</b>
@@ -873,7 +1062,7 @@ onUnmounted(() => clearInterval(qrTimer));
               <div class="detail-line">
                 <span>Статус</span
                 ><el-tag :type="statusType(selectedDetail?.Status || selectedRow.Status)">{{
-                  statusText(selectedDetail?.Status || selectedRow.Status)
+                  selectedDetail?.StatusDescription || statusText(selectedDetail?.Status || selectedRow.Status)
                 }}</el-tag>
               </div>
               <div class="detail-line">
@@ -883,10 +1072,41 @@ onUnmounted(() => clearInterval(qrTimer));
               <div class="detail-line">
                 <span>Тип</span><b>{{ selectedRow.kind }}</b>
               </div>
+              <p v-if="detailLoading" class="field-help">Загрузка подробностей…</p>
+              <div v-for="(detail, index) in dynamicDetails" :key="index" class="detail-line">
+                <span>{{ detail.Title }}</span
+                ><b>{{ detail.Data }}</b>
+              </div>
+              <div v-if="selectedDetail?.OrderRegDate" class="detail-line">
+                <span>Дата</span><b>{{ new Date(selectedDetail.OrderRegDate).toLocaleString('ru-KZ') }}</b>
+              </div>
+              <div v-if="selectedDetail?.AvailableReturnAmount != null" class="detail-line">
+                <span>Доступно к возврату</span><b>{{ money(availableReturnAmount) }}</b>
+              </div>
+              <div v-if="selectedDetail?.PossibleReturnType" class="detail-line">
+                <span>Тип возврата</span><b>{{ selectedDetail.PossibleReturnType }}</b>
+              </div>
+              <div v-for="(item, index) in selectedDetail?.Returns || []" :key="`return-${index}`" class="detail-line">
+                <span>Возврат {{ item.Date }}</span
+                ><b>{{ money(item.Amount) }}</b>
+              </div>
+              <a
+                v-if="receiptURL(selectedDetail?.ReceiptUrl)"
+                :href="receiptURL(selectedDetail.ReceiptUrl)"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="text-link"
+                >Открыть чек <ArrowUpRight :size="16"
+              /></a>
               <div class="detail-actions">
                 <el-button plain @click="copy(selectedRow.QrOperationId || selectedRow.Id)"
                   ><Copy :size="16" /> ID</el-button
-                ><el-button v-if="selectedRow.kind === 'Операция'" type="primary" plain @click="refundFromDetail"
+                ><el-button
+                  v-if="selectedRow.kind === 'Операция' && availableReturnAmount > 0"
+                  :disabled="detailLoading"
+                  type="primary"
+                  plain
+                  @click="refundFromDetail"
                   >Оформить возврат</el-button
                 >
               </div></template

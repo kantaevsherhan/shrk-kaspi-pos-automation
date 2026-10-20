@@ -17,7 +17,7 @@
 В PowerShell случайный ключ можно создать так:
 
 ```powershell
-[Convert]::ToHexString((1..32 | ForEach-Object { Get-Random -Maximum 256 }))
+[Convert]::ToHexString([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
 ```
 
 Для Docker достаточно заполнить `.env` и выполнить `docker compose up -d --build`. Compose публикует порт только локально; для доступа извне настройте HTTPS-прокси.
@@ -64,3 +64,5 @@ corepack pnpm dev
 Vite перенаправляет `/api` и `/health` на Go-сервер `127.0.0.1:3000`. Сборка выполняется командой `corepack pnpm build`.
 
 Если Kaspi отклонит вход с кодом `OldVersionToUpdate`, обновите параметры `APP_VERSION`, `APP_BUILD` и устройства в `.env` согласно используемой версии Kaspi Pay.
+
+Проверка совместимости с исходной Node-версией, сценарии тестирования и границы проверки описаны в [отчёте проверки](docs/VERIFICATION.md).
