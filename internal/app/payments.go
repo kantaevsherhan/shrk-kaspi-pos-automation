@@ -17,6 +17,11 @@ func (a *App) createInvoice(ctx context.Context, s *KaspiSession, phone string, 
 	if !clientPhone(phone) || !validAmount(amount) {
 		return nil, errors.New("valid phoneNumber and positive amount required")
 	}
+	release, err := a.beginInvoiceSend(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	result, err := a.qrRequest(ctx, "POST", "/v01/remote/create", s, map[string]any{"PhoneNumber": phone, "Amount": amount, "Comment": comment})
 	if err != nil {
 		return nil, err

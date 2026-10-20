@@ -25,6 +25,7 @@ func TestBrowserSmokeServer(t *testing.T) {
 	}
 	a.Cfg.FrontendDir = front
 	a.Cfg.SessionCheckInterval = 2 * time.Minute
+	a.Cfg.InvoiceSendInterval = 3500 * time.Millisecond
 	a.Cfg.TokenKey = bytes.Repeat([]byte{1}, 32)
 	if err := a.createAdmin("smoke-owner", "smoke-test-only-password-2026"); err != nil {
 		t.Fatal(err)

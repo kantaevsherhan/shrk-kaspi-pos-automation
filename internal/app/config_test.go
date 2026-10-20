@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDeviceIdentityMatchesOriginalAndSurvivesRestart(t *testing.T) {
@@ -49,6 +50,9 @@ func TestConfigurationRejectsInvalidSecretsAndMonitorSettings(t *testing.T) {
 		{"duplicate API key", "SERVICE_API_KEYS", `{"one":"abcdefghijklmnopqrstuvwxyz1234567890","two":"abcdefghijklmnopqrstuvwxyz1234567890"}`},
 		{"partial Telegram config", "TELEGRAM_BOT_TOKEN", "test-token"},
 		{"short monitor interval", "SESSION_CHECK_INTERVAL", "1s"},
+		{"negative invoice interval", "INVOICE_SEND_INTERVAL", "-1s"},
+		{"invalid invoice interval", "INVOICE_SEND_INTERVAL", "invalid"},
+		{"long invoice interval", "INVOICE_SEND_INTERVAL", "2m"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("TOKEN_SECRET_KEY", strings.Repeat("11", 32))
@@ -57,9 +61,31 @@ func TestConfigurationRejectsInvalidSecretsAndMonitorSettings(t *testing.T) {
 			t.Setenv("TELEGRAM_BOT_TOKEN", "")
 			t.Setenv("TELEGRAM_CHAT_ID", "")
 			t.Setenv("SESSION_CHECK_INTERVAL", "2m")
+			t.Setenv("INVOICE_SEND_INTERVAL", "3.5s")
 			t.Setenv(tc.key, tc.value)
 			if _, err := LoadConfig(); err == nil {
 				t.Fatal("invalid config accepted")
+			}
+		})
+	}
+}
+
+func TestInvoiceIntervalConfiguration(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  time.Duration
+	}{{"", 3500 * time.Millisecond}, {"0s", 0}, {"5s", 5 * time.Second}} {
+		t.Run(tc.value, func(t *testing.T) {
+			t.Setenv("TOKEN_SECRET_KEY", strings.Repeat("11", 32))
+			t.Setenv("SERVICE_API_KEYS", `{"service":"abcdefghijklmnopqrstuvwxyz1234567890"}`)
+			t.Setenv("STATE_DIR", t.TempDir())
+			t.Setenv("TELEGRAM_BOT_TOKEN", "")
+			t.Setenv("TELEGRAM_CHAT_ID", "")
+			t.Setenv("SESSION_CHECK_INTERVAL", "2m")
+			t.Setenv("INVOICE_SEND_INTERVAL", tc.value)
+			cfg, err := LoadConfig()
+			if err != nil || cfg.InvoiceSendInterval != tc.want {
+				t.Fatalf("interval configuration failed: %v", err)
 			}
 		})
 	}

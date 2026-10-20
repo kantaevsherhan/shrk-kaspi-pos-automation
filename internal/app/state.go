@@ -71,6 +71,9 @@ type App struct {
 	monitorFailures int
 	monitorVersion  uint64
 	telegramBaseURL string
+	invoiceGateMu   sync.Mutex
+	invoiceGate     chan struct{}
+	invoiceNextSend time.Time
 }
 
 func New(cfg *Config) (*App, error) {
