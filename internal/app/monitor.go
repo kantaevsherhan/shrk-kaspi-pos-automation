@@ -63,9 +63,14 @@ func (a *App) StartSessionMonitor(ctx context.Context) {
 func (a *App) monitorCycle(ctx context.Context) {
 	a.monitorCheckMu.Lock()
 	defer a.monitorCheckMu.Unlock()
-	s := a.currentSession()
+	s, version := a.sessionSnapshot()
+	if a.monitorVersion != version {
+		a.monitorFailures = 0
+		a.monitorVersion = version
+	}
 	status, reason := "connected", ""
 	if s == nil {
+		a.monitorFailures = 0
 		a.mu.RLock()
 		seen := a.monitor.EverConnected
 		a.mu.RUnlock()
@@ -78,12 +83,21 @@ func (a *App) monitorCycle(ctx context.Context) {
 		checkCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
 		active, _, err := a.checkSession(checkCtx, s)
 		cancel()
+		a.mu.RLock()
+		currentVersion := a.sessionVersion
+		a.mu.RUnlock()
+		if currentVersion != version {
+			a.monitorFailures = 0
+			return
+		}
 		if err != nil {
 			a.monitorFailures++
 			if a.monitorFailures < 3 {
 				a.mu.Lock()
-				a.monitor.LastChecked = time.Now().UTC()
-				_ = a.saveMonitorLocked()
+				if a.sessionVersion == version {
+					a.monitor.LastChecked = time.Now().UTC()
+					_ = a.saveMonitorLocked()
+				}
 				a.mu.Unlock()
 				return
 			}
@@ -95,11 +109,16 @@ func (a *App) monitorCycle(ctx context.Context) {
 			}
 		}
 	}
-	a.updateMonitor(ctx, status, reason)
+	a.updateMonitor(ctx, status, reason, version)
 }
 
-func (a *App) updateMonitor(ctx context.Context, status, reason string) {
+func (a *App) updateMonitor(ctx context.Context, status, reason string, version uint64) {
 	a.mu.Lock()
+	if a.sessionVersion != version {
+		a.mu.Unlock()
+		a.monitorFailures = 0
+		return
+	}
 	a.monitor.Status = status
 	a.monitor.Reason = reason
 	a.monitor.LastChecked = time.Now().UTC()

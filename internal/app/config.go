@@ -170,8 +170,8 @@ func (c *Config) loadIdentity() error {
 		}
 		var ok bool
 		c.PrivateKey, ok = pk.(*ecdsa.PrivateKey)
-		if !ok {
-			return errors.New("keypair.json is not ECDSA")
+		if !ok || c.PrivateKey.Curve != elliptic.P256() {
+			return errors.New("keypair.json must contain an ECDSA P-256 key")
 		}
 	} else if errors.Is(err, os.ErrNotExist) {
 		c.PrivateKey, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

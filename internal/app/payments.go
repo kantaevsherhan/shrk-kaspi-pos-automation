@@ -2,9 +2,10 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
-	"fmt"
 	"math"
+	"strings"
 	"time"
 )
 
@@ -29,7 +30,7 @@ func (a *App) createInvoice(ctx context.Context, s *KaspiSession, phone string, 
 		if status == "" {
 			status = "RemotePaymentCreated"
 		}
-		a.track(&TrackedPayment{ID: id, Type: "invoice", Status: status, Amount: amount, ReceiptURL: stringValue(data["ReceiptUrl"]), OrderNumber: stringValue(data["OrderNumber"]), Created: time.Now()})
+		a.track(&TrackedPayment{ID: id, Type: "invoice", Status: status, Amount: amount, ReceiptURL: stringValue(data["ReceiptUrl"]), OrderNumber: stringValue(data["OrderNumber"]), Created: time.Now(), ProfileID: s.ProfileID})
 	}
 	return result, nil
 }
@@ -57,7 +58,7 @@ func (a *App) createQR(ctx context.Context, s *KaspiSession, amount, lat, lon fl
 		if status == "" {
 			status = "QrTokenCreated"
 		}
-		a.track(&TrackedPayment{ID: id, Type: "qr", Status: status, Amount: amount, QRToken: stringValue(data["QrToken"]), ReceiptURL: stringValue(data["ReceiptUrl"]), ExpireDate: stringValue(data["ExpireDate"]), Created: time.Now()})
+		a.track(&TrackedPayment{ID: id, Type: "qr", Status: status, Amount: amount, QRToken: stringValue(data["QrToken"]), ReceiptURL: stringValue(data["ReceiptUrl"]), ExpireDate: stringValue(data["ExpireDate"]), Created: time.Now(), ProfileID: s.ProfileID})
 	}
 	if token := stringValue(data["QrToken"]); token != "" {
 		data["QrOriginalToken"] = token
@@ -111,12 +112,11 @@ func (a *App) refund(ctx context.Context, s *KaspiSession, id string, amount flo
 	return a.qrRequest(ctx, "POST", "/v01/kaspi-qr/history-pos-return", s, map[string]any{"ReturnAmount": amount, "QrOperationId": jsonNumber(id), "DeviceInterface": "Pos"})
 }
 func jsonNumber(raw string) any {
-	var n int64
-	_, err := fmt.Sscan(raw, &n)
-	if err != nil {
-		return raw
+	value := strings.TrimLeft(raw, "0")
+	if value == "" {
+		value = "0"
 	}
-	return n
+	return json.Number(value)
 }
 func (a *App) checkSession(ctx context.Context, s *KaspiSession) (bool, map[string]any, error) {
 	result, err := a.operations(ctx, s, time.Now().In(time.FixedZone("KZT", 5*3600)).Format("2006-01-02")+"T23:59:59.000+0500", "", 0)

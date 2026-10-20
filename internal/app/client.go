@@ -24,6 +24,9 @@ func (a *App) kaspiRequest(ctx context.Context, method, path string, headers htt
 		return nil, nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, resp, fmt.Errorf("Kaspi returned HTTP %d", resp.StatusCode)
+	}
 	limited := io.LimitReader(resp.Body, 2<<20)
 	var result map[string]any
 	decoder := json.NewDecoder(limited)
@@ -93,7 +96,17 @@ func field(m map[string]any, keys ...string) any {
 	return v
 }
 func kaspiOK(m map[string]any) bool {
-	return numberValue(m["StatusCode"]) == 0 && m["StatusCode"] != nil
+	switch code := m["StatusCode"].(type) {
+	case json.Number:
+		n, err := code.Float64()
+		return err == nil && n == 0
+	case float64:
+		return code == 0
+	case int:
+		return code == 0
+	default:
+		return false
+	}
 }
 func query(path, key, value string) string { return path + "?" + key + "=" + url.QueryEscape(value) }
 func clientPhone(raw string) bool {

@@ -42,16 +42,20 @@ func (a *App) StartPolling(ctx context.Context) {
 	}()
 }
 func (a *App) pollOnce(ctx context.Context) {
-	session := a.currentSession()
-	if session == nil {
-		return
-	}
 	for _, entry := range a.activePayments() {
 		if entry.ExpireDate != "" {
-			if expiry, err := time.Parse(time.RFC3339, entry.ExpireDate); err == nil && time.Now().After(expiry) {
+			if expiry, err := parseKaspiTime(entry.ExpireDate); err == nil && time.Now().After(expiry) {
 				a.finishPayment(entry, "payment.expired", map[string]any{"Status": "Expired", "StatusDesc": "Время оплаты истекло"})
 				continue
 			}
+		}
+		session, version := a.sessionSnapshot()
+		if session == nil {
+			continue
+		}
+		if entry.ProfileID != "" && entry.ProfileID != session.ProfileID {
+			a.finishPayment(entry, "payment.lost", map[string]any{"Status": "SessionChanged", "StatusDesc": "Подключена другая организация; статус платежа неизвестен"})
+			continue
 		}
 		var result map[string]any
 		var err error
@@ -59,6 +63,12 @@ func (a *App) pollOnce(ctx context.Context) {
 			result, err = a.qrStatus(ctx, session, entry.ID)
 		} else {
 			result, err = a.invoiceDetails(ctx, session, entry.ID)
+		}
+		a.mu.RLock()
+		currentVersion := a.sessionVersion
+		a.mu.RUnlock()
+		if currentVersion != version {
+			continue
 		}
 		if err != nil {
 			log.Printf("payment status query failed for %s: %v", entry.ID, err)
@@ -68,7 +78,10 @@ func (a *App) pollOnce(ctx context.Context) {
 			continue
 		}
 		data := obj(result["Data"])
-		status := stringValue(data["Status"])
+		status := ""
+		if kaspiOK(result) {
+			status = stringValue(data["Status"])
+		}
 		a.mu.Lock()
 		current := a.tracked[entry.ID]
 		if current == nil {
@@ -96,16 +109,39 @@ func (a *App) pollOnce(ctx context.Context) {
 	}
 }
 func (a *App) finishPayment(p *TrackedPayment, event string, data map[string]any) {
+	payload := map[string]any{"event": event, "paymentId": p.ID, "type": p.Type, "status": stringValue(data["Status"]), "statusDesc": stringValue(data["StatusDesc"]), "amount": p.Amount, "qrToken": p.QRToken, "receiptUrl": p.ReceiptURL, "orderNumber": p.OrderNumber, "data": data, "timestamp": time.Now().UTC().Format(time.RFC3339)}
+	if p.Amount == 0 {
+		payload["amount"] = numberValue(data["Amount"])
+	}
+	if p.ReceiptURL == "" {
+		payload["receiptUrl"] = stringValue(data["ReceiptUrl"])
+	}
+	if p.OrderNumber == "" {
+		payload["orderNumber"] = stringValue(data["OrderNumber"])
+	}
+	hooks := a.webhooks(event)
 	a.mu.Lock()
 	if a.tracked[p.ID] == nil {
 		a.mu.Unlock()
 		return
 	}
+	// Persist deliveries before forgetting the payment. A restart may repeat a
+	// delivery, but must not discard an undelivered event.
+	for _, hook := range hooks {
+		a.queueDeliveryLocked(hook, payload, 1, time.Now())
+	}
+	a.mu.Unlock()
+	if len(hooks) > 0 {
+		if err := a.saveRetries(); err != nil {
+			log.Printf("could not persist payment webhook queue")
+			return
+		}
+	}
+	a.mu.Lock()
 	delete(a.tracked, p.ID)
 	a.mu.Unlock()
 	_ = a.saveTracked()
-	payload := map[string]any{"event": event, "paymentId": p.ID, "type": p.Type, "status": stringValue(data["Status"]), "statusDesc": stringValue(data["StatusDesc"]), "amount": p.Amount, "qrToken": p.QRToken, "receiptUrl": p.ReceiptURL, "orderNumber": p.OrderNumber, "data": data, "timestamp": time.Now().UTC().Format(time.RFC3339)}
-	for _, hook := range a.webhooks(event) {
+	for _, hook := range hooks {
 		a.deliverWebhook(context.Background(), hook, payload, 1)
 	}
 }
@@ -141,6 +177,13 @@ func (a *App) webhooks(event string) []Webhook {
 	return out
 }
 func (a *App) deliverWebhook(ctx context.Context, hook Webhook, payload map[string]any, attempt int) {
+	a.mu.Lock()
+	a.queueDeliveryLocked(hook, payload, attempt, time.Now())
+	a.mu.Unlock()
+	if err := a.saveRetries(); err != nil {
+		log.Printf("could not persist webhook before delivery")
+		return
+	}
 	body, _ := json.Marshal(payload)
 	mac := hmac.New(sha256.New, []byte(hook.Secret))
 	mac.Write(body)
@@ -161,10 +204,13 @@ func (a *App) deliverWebhook(ctx context.Context, hook Webhook, payload map[stri
 		}
 	}
 	if err == nil {
+		a.removeDelivery(hook, payload)
 		return
 	}
-	log.Printf("webhook delivery failed (attempt %d): %v", attempt, err)
+	// Transport errors can include credentials embedded in the configured URL.
+	log.Printf("webhook delivery failed (attempt %d)", attempt)
 	if attempt >= 3 {
+		a.removeDelivery(hook, payload)
 		return
 	}
 	delay := 5 * time.Second
@@ -172,27 +218,54 @@ func (a *App) deliverWebhook(ctx context.Context, hook Webhook, payload map[stri
 		delay = 30 * time.Second
 	}
 	a.mu.Lock()
-	a.retries = append(a.retries, webhookRetry{Hook: hook, Payload: payload, Attempt: attempt + 1, ExecuteAfter: time.Now().Add(delay)})
+	a.queueDeliveryLocked(hook, payload, attempt+1, time.Now().Add(delay))
 	a.mu.Unlock()
 	_ = a.saveRetries()
 }
 func (a *App) processRetries(ctx context.Context) {
 	a.mu.Lock()
 	due := []webhookRetry{}
-	pending := []webhookRetry{}
 	for _, r := range a.retries {
 		if !time.Now().Before(r.ExecuteAfter) {
 			due = append(due, r)
-		} else {
-			pending = append(pending, r)
+		}
+	}
+	a.mu.Unlock()
+	for _, r := range due {
+		a.deliverWebhook(ctx, r.Hook, r.Payload, r.Attempt)
+	}
+}
+
+func sameDelivery(r webhookRetry, hook Webhook, payload map[string]any) bool {
+	return r.Hook.URL == hook.URL && stringValue(r.Payload["paymentId"]) == stringValue(payload["paymentId"]) && stringValue(r.Payload["event"]) == stringValue(payload["event"])
+}
+func (a *App) queueDeliveryLocked(hook Webhook, payload map[string]any, attempt int, at time.Time) {
+	entry := webhookRetry{Hook: hook, Payload: payload, Attempt: attempt, ExecuteAfter: at}
+	for i, current := range a.retries {
+		if sameDelivery(current, hook, payload) {
+			a.retries[i] = entry
+			return
+		}
+	}
+	a.retries = append(a.retries, entry)
+}
+func (a *App) removeDelivery(hook Webhook, payload map[string]any) {
+	a.mu.Lock()
+	pending := a.retries[:0]
+	for _, current := range a.retries {
+		if !sameDelivery(current, hook, payload) {
+			pending = append(pending, current)
 		}
 	}
 	a.retries = pending
 	a.mu.Unlock()
-	if len(due) > 0 {
-		_ = a.saveRetries()
+	_ = a.saveRetries()
+}
+func parseKaspiTime(raw string) (time.Time, error) {
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02T15:04:05.999999999-0700"} {
+		if parsed, err := time.Parse(layout, raw); err == nil {
+			return parsed, nil
+		}
 	}
-	for _, r := range due {
-		a.deliverWebhook(ctx, r.Hook, r.Payload, r.Attempt)
-	}
+	return time.Time{}, errors.New("invalid Kaspi timestamp")
 }

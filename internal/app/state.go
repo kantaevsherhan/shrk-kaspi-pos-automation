@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -19,8 +20,10 @@ type KaspiSession struct {
 	OrganizationID string `json:"organizationId"`
 }
 type authFlow struct {
+	mu                          sync.Mutex
 	ProcessID, UserToken, Phone string
 	Created                     time.Time
+	Finished                    bool
 }
 type TrackedPayment struct {
 	ID          string    `json:"paymentId"`
@@ -33,6 +36,7 @@ type TrackedPayment struct {
 	ExpireDate  string    `json:"expireDate,omitempty"`
 	Created     time.Time `json:"createdAt"`
 	RetryCount  int       `json:"retryCount"`
+	ProfileID   string    `json:"profileId,omitempty"`
 }
 type Webhook struct {
 	URL    string   `json:"url"`
@@ -50,8 +54,12 @@ type App struct {
 	Cfg             *Config
 	client          *http.Client
 	mu              sync.RWMutex
+	stateWriteMu    sync.Mutex
+	sessionWriteMu  sync.Mutex
+	sessionVersion  uint64
 	session         *KaspiSession
 	flows           map[string]*authFlow
+	authStarts      int
 	tracked         map[string]*TrackedPayment
 	retries         []webhookRetry
 	admin           *adminAccount
@@ -60,6 +68,7 @@ type App struct {
 	monitor         monitorState
 	monitorCheckMu  sync.Mutex
 	monitorFailures int
+	monitorVersion  uint64
 	telegramBaseURL string
 }
 
@@ -84,6 +93,14 @@ func New(cfg *Config) (*App, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
+	if a.tracked == nil {
+		a.tracked = map[string]*TrackedPayment{}
+	}
+	for id, entry := range a.tracked {
+		if entry == nil || !safeID(id) || entry.ID != id || (entry.Type != "qr" && entry.Type != "invoice") {
+			return nil, errors.New("invalid pending payment state")
+		}
+	}
 	if b, err := os.ReadFile(filepath.Join(cfg.StateDir, "webhook-retries.json")); err == nil {
 		if err = json.Unmarshal(b, &a.retries); err != nil {
 			a.retries, err = readLegacyRetries(b)
@@ -99,12 +116,15 @@ func New(cfg *Config) (*App, error) {
 
 func readLegacyPayments(b []byte) (map[string]*TrackedPayment, error) {
 	var old map[string]struct {
-		PaymentID  string `json:"paymentId"`
-		Type       string `json:"type"`
-		Status     string `json:"status"`
-		CreatedAt  int64  `json:"createdAt"`
-		RetryCount int    `json:"retryCount"`
-		Meta       struct {
+		PaymentID      string `json:"paymentId"`
+		Type           string `json:"type"`
+		Status         string `json:"status"`
+		CreatedAt      int64  `json:"createdAt"`
+		RetryCount     int    `json:"retryCount"`
+		SessionHeaders struct {
+			ProfileID json.RawMessage `json:"profileId"`
+		} `json:"sessionHeaders"`
+		Meta struct {
 			Amount      float64 `json:"amount"`
 			QRToken     string  `json:"qrToken"`
 			ReceiptURL  string  `json:"receiptUrl"`
@@ -120,7 +140,11 @@ func readLegacyPayments(b []byte) (map[string]*TrackedPayment, error) {
 		if id == "" {
 			continue
 		}
-		converted[id] = &TrackedPayment{ID: id, Type: p.Type, Status: p.Status, Amount: p.Meta.Amount, QRToken: p.Meta.QRToken, ReceiptURL: p.Meta.ReceiptURL, OrderNumber: p.Meta.OrderNumber, ExpireDate: p.Meta.ExpireDate, Created: time.UnixMilli(p.CreatedAt), RetryCount: p.RetryCount}
+		var profile any
+		decoder := json.NewDecoder(strings.NewReader(string(p.SessionHeaders.ProfileID)))
+		decoder.UseNumber()
+		_ = decoder.Decode(&profile)
+		converted[id] = &TrackedPayment{ID: id, Type: p.Type, Status: p.Status, Amount: p.Meta.Amount, QRToken: p.Meta.QRToken, ReceiptURL: p.Meta.ReceiptURL, OrderNumber: p.Meta.OrderNumber, ExpireDate: p.Meta.ExpireDate, Created: time.UnixMilli(p.CreatedAt), RetryCount: p.RetryCount, ProfileID: stringValue(profile)}
 	}
 	return converted, nil
 }
@@ -162,6 +186,8 @@ func (a *App) loadSession() error {
 	return nil
 }
 func (a *App) saveSession(s *KaspiSession) error {
+	a.sessionWriteMu.Lock()
+	defer a.sessionWriteMu.Unlock()
 	b, err := json.Marshal(s)
 	if err != nil {
 		return err
@@ -179,36 +205,46 @@ func (a *App) saveSession(s *KaspiSession) error {
 	}
 	a.mu.Lock()
 	a.session = s
+	a.sessionVersion++
 	a.monitor.EverConnected = true
 	_ = a.saveMonitorLocked()
 	a.mu.Unlock()
 	return nil
 }
 func (a *App) clearSession() error {
+	a.sessionWriteMu.Lock()
+	defer a.sessionWriteMu.Unlock()
+	err := os.Remove(a.sessionPath())
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	a.mu.Lock()
 	if a.session != nil {
 		a.monitor.EverConnected = true
 	}
 	a.session = nil
+	a.sessionVersion++
 	_ = a.saveMonitorLocked()
 	a.mu.Unlock()
-	err := os.Remove(a.sessionPath())
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	return err
+	return nil
 }
 func (a *App) currentSession() *KaspiSession {
+	s, _ := a.sessionSnapshot()
+	return s
+}
+func (a *App) sessionSnapshot() (*KaspiSession, uint64) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	if a.session == nil {
-		return nil
+		return nil, a.sessionVersion
 	}
 	copy := *a.session
 	copy.Secret = append([]byte(nil), a.session.Secret...)
-	return &copy
+	return &copy, a.sessionVersion
 }
 func (a *App) saveTracked() error {
+	a.stateWriteMu.Lock()
+	defer a.stateWriteMu.Unlock()
 	a.mu.RLock()
 	b, err := json.MarshalIndent(a.tracked, "", "  ")
 	a.mu.RUnlock()
@@ -218,6 +254,8 @@ func (a *App) saveTracked() error {
 	return writeBytes(filepath.Join(a.Cfg.StateDir, "tracked-payments.json"), b)
 }
 func (a *App) saveRetries() error {
+	a.stateWriteMu.Lock()
+	defer a.stateWriteMu.Unlock()
 	a.mu.RLock()
 	b, err := json.MarshalIndent(a.retries, "", "  ")
 	a.mu.RUnlock()

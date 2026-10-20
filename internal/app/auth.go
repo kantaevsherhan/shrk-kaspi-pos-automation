@@ -11,6 +11,9 @@ import (
 	"time"
 )
 
+var errLoginFlow = errors.New("unknown, completed or expired processId; start login again")
+var errTooManyFlows = errors.New("too many active SMS logins")
+
 func (c *Config) entranceCookie(token string) string {
 	d := c.Device
 	p := c.App
@@ -44,11 +47,14 @@ func (a *App) initLogin(ctx context.Context) (map[string]any, error) {
 			delete(a.flows, id)
 		}
 	}
-	count := len(a.flows)
-	a.mu.Unlock()
+	count := len(a.flows) + a.authStarts
 	if count >= 100 {
-		return nil, errors.New("too many active SMS logins")
+		a.mu.Unlock()
+		return nil, errTooManyFlows
 	}
+	a.authStarts++
+	a.mu.Unlock()
+	defer func() { a.mu.Lock(); a.authStarts--; a.mu.Unlock() }()
 	c := a.Cfg
 	p := c.App
 	d := c.Device
@@ -72,7 +78,7 @@ func (a *App) getFlow(id string) (*authFlow, error) {
 	flow := a.flows[id]
 	a.mu.RUnlock()
 	if flow == nil || time.Since(flow.Created) > 10*time.Minute {
-		return nil, errors.New("unknown or expired processId; start login again")
+		return nil, errLoginFlow
 	}
 	return flow, nil
 }
@@ -95,6 +101,11 @@ func (a *App) sendPhone(ctx context.Context, id, phone string) (map[string]any, 
 	if err != nil {
 		return nil, err
 	}
+	flow.mu.Lock()
+	defer flow.mu.Unlock()
+	if flow.Finished {
+		return nil, errLoginFlow
+	}
 	flow.Phone = phone
 	result, err := a.authStep(ctx, flow, map[string]any{"phoneNumber": phone}, "EnterPhoneNumber")
 	if err != nil {
@@ -113,6 +124,9 @@ func (a *App) sendPhone(ctx context.Context, id, phone string) (map[string]any, 
 		message = stringValue(reason["desc"])
 	}
 	if message == "" {
+		message = stringValue(reason["description"])
+	}
+	if message == "" {
 		message = stringValue(field(result, "data", "desc"))
 	}
 	return map[string]any{"success": sent, "processId": id, "desc": field(result, "data", "desc"), "view": field(result, "view", "code"), "errorCode": reason["code"], "errorMessage": message, "body": result}, nil
@@ -121,6 +135,11 @@ func (a *App) verifyOTP(ctx context.Context, id, otp string) (map[string]any, er
 	flow, err := a.getFlow(id)
 	if err != nil {
 		return nil, err
+	}
+	flow.mu.Lock()
+	defer flow.mu.Unlock()
+	if flow.Finished {
+		return nil, errLoginFlow
 	}
 	result, err := a.authStep(ctx, flow, map[string]any{"userOtp": otp, "inputType": "auto"}, "ViewEnterOtp")
 	if err != nil {
@@ -133,6 +152,7 @@ func (a *App) verifyOTP(ctx context.Context, id, otp string) (map[string]any, er
 	if err != nil {
 		return nil, err
 	}
+	flow.Finished = true
 	a.mu.Lock()
 	delete(a.flows, id)
 	a.mu.Unlock()

@@ -114,25 +114,27 @@ func clientIP(r *http.Request) string {
 	}
 	return host
 }
-func (a *App) loginAllowed(ip string) bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	f := a.loginFailures[ip]
-	return f.Count < 5 || time.Now().After(f.Until)
-}
-func (a *App) loginFailed(ip string) {
+func (a *App) beginLoginAttempt(ip string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.loginFailures == nil {
 		a.loginFailures = map[string]loginFailure{}
 	}
+	for address, entry := range a.loginFailures {
+		if time.Now().After(entry.Until) {
+			delete(a.loginFailures, address)
+		}
+	}
 	f := a.loginFailures[ip]
-	if time.Now().After(f.Until) {
-		f.Count = 0
+	if f.Count >= 5 || len(a.loginFailures) >= 4096 {
+		return false
 	}
 	f.Count++
-	f.Until = time.Now().Add(15 * time.Minute)
+	if f.Until.IsZero() {
+		f.Until = time.Now().Add(15 * time.Minute)
+	}
 	a.loginFailures[ip] = f
+	return true
 }
 func (a *App) loginSucceeded(ip string) {
 	a.mu.Lock()

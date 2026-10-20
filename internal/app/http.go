@@ -47,7 +47,9 @@ func (a *App) authorized(r *http.Request) bool {
 }
 func (a *App) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) { respond(w, 200, map[string]any{"ok": true}) })
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+		respond(w, 200, map[string]any{"ok": true, "status": "ok"})
+	})
 	mux.HandleFunc("GET /api/admin/status", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.RLock()
 		configured := a.admin != nil
@@ -100,12 +102,11 @@ func (a *App) Handler() http.Handler {
 			return
 		}
 		ip := clientIP(r)
-		if !a.loginAllowed(ip) {
+		if !a.beginLoginAttempt(ip) {
 			fail(w, 429, "Too many login attempts; try again later")
 			return
 		}
 		if !a.checkAdmin(input.Username, input.Password) {
-			a.loginFailed(ip)
 			fail(w, 401, "Invalid username or password")
 			return
 		}
@@ -190,19 +191,29 @@ func (a *App) Handler() http.Handler {
 	}
 	call := func(w http.ResponseWriter, result map[string]any, err error) {
 		if err != nil {
+			if errors.Is(err, errLoginFlow) {
+				fail(w, 400, err.Error())
+				return
+			}
+			if errors.Is(err, errTooManyFlows) {
+				fail(w, 429, err.Error())
+				return
+			}
 			fail(w, 502, err.Error())
 			return
 		}
 		respond(w, 200, result)
 	}
-	api("GET", "/api/auth/session", false, func(w http.ResponseWriter, r *http.Request, _ *KaspiSession) {
+	sessionStatus := func(w http.ResponseWriter, r *http.Request, _ *KaspiSession) {
 		s := a.currentSession()
 		if s == nil {
 			respond(w, 200, map[string]any{"authenticated": false})
 			return
 		}
 		respond(w, 200, map[string]any{"authenticated": true, "orgName": s.OrgName, "phone": s.Phone, "organizationId": s.OrganizationID})
-	})
+	}
+	api("GET", "/api/auth/session", false, sessionStatus)
+	api("POST", "/api/auth/session", false, sessionStatus)
 	api("POST", "/api/auth/logout", false, func(w http.ResponseWriter, r *http.Request, _ *KaspiSession) {
 		if err := a.clearSession(); err != nil {
 			fail(w, 500, "Could not clear session")
@@ -254,35 +265,43 @@ func (a *App) Handler() http.Handler {
 		respond(w, 200, map[string]any{"items": a.activePayments()})
 	})
 	api("GET", "/api/invoice/client-info", true, func(w http.ResponseWriter, r *http.Request, s *KaspiSession) {
+		if !clientPhone(r.URL.Query().Get("phoneNumber")) {
+			fail(w, 400, "valid phoneNumber required")
+			return
+		}
 		result, err := a.clientInfo(r.Context(), s, r.URL.Query().Get("phoneNumber"))
 		call(w, result, err)
 	})
 	api("POST", "/api/invoice/create", true, func(w http.ResponseWriter, r *http.Request, s *KaspiSession) {
 		var x struct {
-			Phone   string  `json:"phoneNumber"`
-			Amount  float64 `json:"amount"`
-			Comment string  `json:"comment"`
+			Phone   string      `json:"phoneNumber"`
+			Amount  amountValue `json:"amount"`
+			Comment string      `json:"comment"`
 		}
-		if decode(r, &x) != nil || !clientPhone(x.Phone) || !validAmount(x.Amount) {
+		if decode(r, &x) != nil || !clientPhone(x.Phone) || !validAmount(float64(x.Amount)) {
 			fail(w, 400, "valid phoneNumber and positive amount required")
 			return
 		}
-		result, err := a.createInvoice(r.Context(), s, x.Phone, x.Amount, x.Comment)
+		result, err := a.createInvoice(r.Context(), s, x.Phone, float64(x.Amount), x.Comment)
 		call(w, result, err)
 	})
 	api("GET", "/api/invoice/details", true, func(w http.ResponseWriter, r *http.Request, s *KaspiSession) {
+		if !safeID(r.URL.Query().Get("operationId")) {
+			fail(w, 400, "operationId required")
+			return
+		}
 		result, err := a.invoiceDetails(r.Context(), s, r.URL.Query().Get("operationId"))
 		call(w, result, err)
 	})
 	api("POST", "/api/invoice/cancel", true, func(w http.ResponseWriter, r *http.Request, s *KaspiSession) {
 		var x struct {
-			ID string `json:"operationId"`
+			ID identifier `json:"operationId"`
 		}
-		if decode(r, &x) != nil || !safeID(x.ID) {
+		if decode(r, &x) != nil || !safeID(string(x.ID)) {
 			fail(w, 400, "operationId required")
 			return
 		}
-		result, err := a.cancelInvoice(r.Context(), s, x.ID)
+		result, err := a.cancelInvoice(r.Context(), s, string(x.ID))
 		call(w, result, err)
 	})
 	api("POST", "/api/invoice/history", true, func(w http.ResponseWriter, r *http.Request, s *KaspiSession) {
@@ -291,18 +310,22 @@ func (a *App) Handler() http.Handler {
 	})
 	api("POST", "/api/qr/create", true, func(w http.ResponseWriter, r *http.Request, s *KaspiSession) {
 		var x struct {
-			Amount    float64 `json:"amount"`
-			Latitude  float64 `json:"latitude"`
-			Longitude float64 `json:"longitude"`
+			Amount    amountValue `json:"amount"`
+			Latitude  float64     `json:"latitude"`
+			Longitude float64     `json:"longitude"`
 		}
-		if decode(r, &x) != nil || !validAmount(x.Amount) {
+		if decode(r, &x) != nil || !validAmount(float64(x.Amount)) {
 			fail(w, 400, "positive amount required")
 			return
 		}
-		result, err := a.createQR(r.Context(), s, x.Amount, x.Latitude, x.Longitude)
+		result, err := a.createQR(r.Context(), s, float64(x.Amount), x.Latitude, x.Longitude)
 		call(w, result, err)
 	})
 	api("GET", "/api/qr/status", true, func(w http.ResponseWriter, r *http.Request, s *KaspiSession) {
+		if !safeID(r.URL.Query().Get("qrOperationId")) {
+			fail(w, 400, "qrOperationId required")
+			return
+		}
 		result, err := a.qrStatus(r.Context(), s, r.URL.Query().Get("qrOperationId"))
 		call(w, result, err)
 	})
@@ -321,26 +344,26 @@ func (a *App) Handler() http.Handler {
 	})
 	api("POST", "/api/history/details", true, func(w http.ResponseWriter, r *http.Request, s *KaspiSession) {
 		var x struct {
-			ID     string `json:"id"`
-			Method int    `json:"operationMethod"`
+			ID     identifier `json:"id"`
+			Method int        `json:"operationMethod"`
 		}
-		if decode(r, &x) != nil || !safeID(x.ID) {
+		if decode(r, &x) != nil || !safeID(string(x.ID)) {
 			fail(w, 400, "id required")
 			return
 		}
-		result, err := a.operationDetails(r.Context(), s, x.ID, x.Method)
+		result, err := a.operationDetails(r.Context(), s, string(x.ID), x.Method)
 		call(w, result, err)
 	})
 	api("POST", "/api/refund/create", true, func(w http.ResponseWriter, r *http.Request, s *KaspiSession) {
 		var x struct {
-			ID     string  `json:"qrOperationId"`
-			Amount float64 `json:"returnAmount"`
+			ID     identifier  `json:"qrOperationId"`
+			Amount amountValue `json:"returnAmount"`
 		}
-		if decode(r, &x) != nil || !safeID(x.ID) || !validAmount(x.Amount) {
+		if decode(r, &x) != nil || !safeID(string(x.ID)) || !validAmount(float64(x.Amount)) {
 			fail(w, 400, "valid qrOperationId and positive returnAmount required")
 			return
 		}
-		result, err := a.refund(r.Context(), s, x.ID, x.Amount)
+		result, err := a.refund(r.Context(), s, string(x.ID), float64(x.Amount))
 		call(w, result, err)
 	})
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
