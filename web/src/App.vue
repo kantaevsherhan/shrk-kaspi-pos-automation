@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import QRCode from 'qrcode';
-import { ElMessage, ElMessageBox } from 'element-plus';
+import { ElAlert, ElMessage, ElMessageBox } from 'element-plus';
 import PhoneInput from './components/PhoneInput.vue';
 import { formatPhone, isValidPhone, normalizePhone } from './lib/phone';
 import {
@@ -537,6 +537,12 @@ async function sendPhone() {
   }
 }
 async function advanceKaspiLogin(result) {
+  if (result.nextStep === 'kaspi_id') {
+    authStep.value = 4;
+    kaspiPassword.value = '';
+    otp.value = '';
+    return;
+  }
   if (!result.success) throw new Error(result.errorMessage || result.desc || 'Kaspi не принял этот шаг входа');
   if (result.nextStep === 'password') {
     authStep.value = 3;
@@ -1238,7 +1244,9 @@ onUnmounted(() => {
                   </div>
                   <p v-if="checkResult" class="field-help">{{ checkResult }}</p></template
                 ><template v-else
-                  ><p class="panel-intro">Укажите телефон. Kaspi запросит пароль аккаунта или код из SMS.</p>
+                  ><p v-if="authStep !== 4" class="panel-intro">
+                    Укажите телефон. Kaspi запросит пароль аккаунта или код из SMS.
+                  </p>
                   <div v-if="authStep === 0" class="auth-step">
                     <span class="step-circle">01</span>
                     <h3>Начните подключение</h3>
@@ -1291,6 +1299,23 @@ onUnmounted(() => {
                       >Продолжить</el-button
                     >
                   </div>
+                  <div v-else-if="authStep === 4" class="form-fields" role="status">
+                    <el-tag type="warning">Вход не завершён</el-tag>
+                    <h3>Нужна проверка Kaspi ID</h3>
+                    <p>Kaspi запросил подтверждение личности по фото.</p>
+                    <el-alert
+                      title="Проверка по фото пока недоступна в панели"
+                      type="warning"
+                      :closable="false"
+                      show-icon
+                      description="Этот шаг использует нативный модуль камеры Kaspi ID. Веб-панель его пока не поддерживает, поэтому аккаунт ещё не подключён."
+                    />
+                    <p class="field-help">
+                      Отдельный вход в приложение на телефоне не завершит текущую сессию сервиса. Для продолжения нужна
+                      интеграция с официальным модулем Kaspi ID.
+                    </p>
+                    <el-button size="large" @click="authStep = 0">Вернуться к подключению</el-button>
+                  </div>
                   <div v-else class="form-fields">
                     <label class="field-label">Код из SMS</label
                     ><el-input v-model="otp" size="large" placeholder="Введите код" maxlength="8" /><el-button
@@ -1302,7 +1327,9 @@ onUnmounted(() => {
                       >Подтвердить вход</el-button
                     >
                   </div>
-                  <el-button v-if="authStep > 0" text :disabled="busy" @click="beginAuth">Начать заново</el-button>
+                  <el-button v-if="authStep > 0 && authStep !== 4" text :disabled="busy" @click="beginAuth"
+                    >Начать заново</el-button
+                  >
                 </template>
               </section>
               <section class="panel result-panel">

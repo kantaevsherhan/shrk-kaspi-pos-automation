@@ -54,6 +54,9 @@ func TestBrowserSmokeServer(t *testing.T) {
 			if field(input, "meta", "sn") == "ViewEnterLoginPassword" {
 				view, step = "EnterOtp", "ViewEnterOtp"
 			}
+			if field(input, "meta", "sn") == "ViewEnterOtp" {
+				view, step = "UniversalKaspiIdTakePhoto", "KaspiIdTakePhoto"
+			}
 			json.NewEncoder(w).Encode(map[string]any{"meta": map[string]any{"pId": "smoke-process", "sn": step}, "view": map[string]any{"code": view}})
 			return
 		case "/v01/remote/client-info":

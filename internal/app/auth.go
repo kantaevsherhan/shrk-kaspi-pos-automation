@@ -154,6 +154,17 @@ func (a *App) authProgress(ctx context.Context, id string, flow *authFlow, resul
 		message = stringValue(field(result, "data", "desc"))
 	}
 	response := map[string]any{"success": false, "processId": id, "desc": stringValue(field(result, "data", "desc")), "view": field(result, "view", "code"), "errorCode": stringValue(reason["code"]), "errorMessage": message, "smsSent": false}
+	view := stringValue(field(result, "view", "code"))
+	// Photo verification requires Kaspi's native faceCheck bridge. Never treat
+	// this challenge as OTP delivery or completed device registration.
+	if view == "UniversalKaspiIdTakePhoto" || view == "KaspiIdTakePhoto" {
+		response["nextStep"] = "kaspi_id"
+		response["requiresUserAction"], response["supported"] = true, false
+		response["errorCode"] = "KASPI_ID_NATIVE_REQUIRED"
+		response["errorMessage"] = "Kaspi запросил проверку личности по фото. Для этого нужен нативный модуль Kaspi ID, который эта панель пока не поддерживает. Вход не завершён."
+		response["desc"] = ""
+		return response, nil
+	}
 	registration := stringValue(field(result, "data", "type")) == "kpDeviceRegistration" || stringValue(field(result, "view", "code")) == "KPMobileCall"
 	if len(reason) > 0 || result["actType"] == "Alarm" || (result["isClosed"] == true && !registration) {
 		if message == "" {
@@ -161,7 +172,6 @@ func (a *App) authProgress(ctx context.Context, id string, flow *authFlow, resul
 		}
 		return response, nil
 	}
-	view := stringValue(field(result, "view", "code"))
 	step := stringValue(field(result, "meta", "sn"))
 	if registration {
 		connected, err := a.finishLogin(ctx, flow)
