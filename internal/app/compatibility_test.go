@@ -131,7 +131,7 @@ func TestOriginalSMSLoginAndEncryptedRestart(t *testing.T) {
 			steps++
 			switch steps {
 			case 1:
-				if field(input, "Data", "auth") != "2" || input["actType"] != "Success" {
+				if field(input, "data", "auth") != "2" || input["actType"] != "Success" {
 					t.Error("entrance init payload changed")
 				}
 				http.SetCookie(w, &http.Cookie{Name: "user_token", Value: "first-cookie"})

@@ -59,7 +59,9 @@ func (a *App) initLogin(ctx context.Context) (map[string]any, error) {
 	p := c.App
 	d := c.Device
 	referer := fmt.Sprintf("%s/process/entrance/?auth=2&appBuild=%s&appVersion=%s&platformVersion=%s&platformType=IOS&deviceBrand=%s&deviceModel=%s&deviceId=%s&installId=%s&frontCameraAvailable=true&sf=registration&pc=KPEntrance&noPass=0", c.EntranceURL, p.Build, p.Version, p.PlatformVer, p.Brand, p.Model, d.DeviceID, d.InstallID)
-	payload := map[string]any{"data": map[string]any{}, "Data": map[string]any{"auth": "2", "appBuild": p.Build, "appVersion": p.Version, "platformVersion": p.PlatformVer, "platformType": "IOS", "deviceBrand": p.Brand, "deviceModel": p.Model, "deviceId": d.DeviceID, "installId": d.InstallID, "frontCameraAvailable": "true", "sf": "registration", "pc": "KPEntrance", "noPass": "0"}, "actType": "Success"}
+	// Kaspi binds Data/data case-insensitively. Go sorts map keys, so sending
+	// both would put the empty lowercase field last and erase the launch data.
+	payload := map[string]any{"data": map[string]any{"auth": "2", "appBuild": p.Build, "appVersion": p.Version, "platformVersion": p.PlatformVer, "platformType": "IOS", "deviceBrand": p.Brand, "deviceModel": p.Model, "deviceId": d.DeviceID, "installId": d.InstallID, "frontCameraAvailable": "true", "sf": "registration", "pc": "KPEntrance", "noPass": "0"}, "actType": "Success"}
 	body, _ := json.Marshal(payload)
 	result, resp, err := a.kaspiRequest(ctx, "POST", c.EntranceURL+"/api/v1/entrance/step", c.entranceHeaders(referer, ""), body)
 	if err != nil {
