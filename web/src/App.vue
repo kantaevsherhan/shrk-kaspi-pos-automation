@@ -1327,8 +1327,14 @@ onUnmounted(() => {
                       >Подтвердить вход</el-button
                     >
                   </div>
-                  <el-button v-if="authStep > 0 && authStep !== 4" text :disabled="busy" @click="beginAuth"
-                    >Начать заново</el-button
+                  <el-button
+                    v-if="authStep > 0 && authStep !== 4"
+                    class="auth-restart"
+                    size="large"
+                    plain
+                    :disabled="busy"
+                    @click="beginAuth"
+                    ><RotateCcw :size="16" /> Начать заново</el-button
                   >
                 </template>
               </section>

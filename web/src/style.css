@@ -871,6 +871,10 @@ p {
   color: #9da5b2;
   margin-top: 3px;
 }
+.auth-restart.el-button {
+  width: 100%;
+  margin: 12px 0 0;
+}
 .auth-step {
   margin-top: 30px;
 }
