@@ -22,6 +22,7 @@ type KaspiSession struct {
 type authFlow struct {
 	mu                          sync.Mutex
 	ProcessID, UserToken, Phone string
+	Step, View                  string
 	Created                     time.Time
 	Finished                    bool
 }

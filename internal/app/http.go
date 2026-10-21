@@ -237,6 +237,18 @@ func (a *App) Handler() http.Handler {
 		result, err := a.sendPhone(r.Context(), x.ProcessID, x.Phone)
 		call(w, result, err)
 	})
+	api("POST", "/api/auth/verify-password", false, func(w http.ResponseWriter, r *http.Request, _ *KaspiSession) {
+		var x struct {
+			ProcessID string `json:"processId"`
+			Password  string `json:"password"`
+		}
+		if decode(r, &x) != nil || x.ProcessID == "" || strings.TrimSpace(x.Password) == "" || len(x.Password) > 256 {
+			fail(w, 400, "processId and Kaspi Pay password required")
+			return
+		}
+		result, err := a.verifyKaspiPassword(r.Context(), x.ProcessID, x.Password)
+		call(w, result, err)
+	})
 	api("POST", "/api/auth/verify-otp", false, func(w http.ResponseWriter, r *http.Request, _ *KaspiSession) {
 		var x struct {
 			ProcessID string `json:"processId"`

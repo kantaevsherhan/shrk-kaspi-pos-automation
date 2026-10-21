@@ -11,6 +11,17 @@ export function normalizePhone(value) {
   return isValidPhone(value) ? `7${nationalPhone(value)}` : '';
 }
 
+export function parsePhoneInput(value) {
+  const text = String(value ?? '');
+  const digits = text.replace(/\D/g, '');
+  return /^\s*\+7/.test(text) ? digits.slice(1) : nationalPhone(text);
+}
+
+export function formatPhoneInput(value) {
+  const digits = nationalPhone(value);
+  return digits ? `+7 ${formatNationalPhone(digits)}` : '';
+}
+
 export function formatNationalPhone(value) {
   const digits = nationalPhone(value);
   if (!digits || digits.length > 10) return digits;

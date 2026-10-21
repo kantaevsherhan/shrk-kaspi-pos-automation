@@ -46,10 +46,13 @@ func TestBrowserSmokeServer(t *testing.T) {
 			json.NewDecoder(r.Body).Decode(&input)
 			view, step := "KPUniversalEnterPhoneNumber", "EnterPhoneNumber"
 			if field(input, "meta", "sn") == "EnterPhoneNumber" {
-				view, step = "EnterOtp", "ViewEnterOtp"
+				view, step = "KPEnterLoginPassword", "ViewEnterLoginPassword"
 				if field(input, "data", "phoneNumber") != "7001234567" {
 					t.Error("masked phone was not sent in national format")
 				}
+			}
+			if field(input, "meta", "sn") == "ViewEnterLoginPassword" {
+				view, step = "EnterOtp", "ViewEnterOtp"
 			}
 			json.NewEncoder(w).Encode(map[string]any{"meta": map[string]any{"pId": "smoke-process", "sn": step}, "view": map[string]any{"code": view}})
 			return
@@ -89,7 +92,11 @@ func TestBrowserSmokeServer(t *testing.T) {
 	defer mock.Close()
 	a.Cfg.QRPayURL = mock.URL
 	a.Cfg.EntranceURL = mock.URL
-	server := &http.Server{Addr: "127.0.0.1:38473", Handler: a.Handler(), ReadHeaderTimeout: 5 * time.Second}
+	address := os.Getenv("KASPI_BROWSER_SMOKE_ADDR")
+	if address == "" {
+		address = "127.0.0.1:38473"
+	}
+	server := &http.Server{Addr: address, Handler: a.Handler(), ReadHeaderTimeout: 5 * time.Second}
 	t.Cleanup(func() { server.Close() })
 	t.Log("isolated browser fixture: http://127.0.0.1:38473")
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {

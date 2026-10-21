@@ -46,6 +46,7 @@ const processId = ref('');
 const authStep = ref(0);
 const phone = ref('');
 const phoneTouched = ref(false);
+const kaspiPassword = ref('');
 const otp = ref('');
 const invoice = ref({ phoneNumber: '', amount: null, comment: '' });
 const qrAmount = ref(null);
@@ -245,6 +246,8 @@ async function lock() {
     }
   }
   unlocked.value = false;
+  kaspiPassword.value = '';
+  otp.value = '';
   clearInterval(qrTimer);
   clearInterval(qrCountdownTimer);
   clearInterval(invoiceTimer);
@@ -505,6 +508,8 @@ async function beginAuth() {
     if (!result.success) throw new Error('Kaspi не начал вход');
     processId.value = result.processId;
     phoneTouched.value = false;
+    kaspiPassword.value = '';
+    otp.value = '';
     authStep.value = 1;
   } catch (error) {
     report(error);
@@ -524,12 +529,49 @@ async function sendPhone() {
       processId: processId.value,
       phoneNumber: normalizePhone(phone.value),
     });
-    if (!result.success) throw new Error(result.errorMessage || result.desc || 'Kaspi не отправил SMS');
-    authStep.value = 2;
-    ElMessage.success('Код отправлен');
+    await advanceKaspiLogin(result);
   } catch (error) {
     report(error);
   } finally {
+    busy.value = false;
+  }
+}
+async function advanceKaspiLogin(result) {
+  if (!result.success) throw new Error(result.errorMessage || result.desc || 'Kaspi не принял этот шаг входа');
+  if (result.nextStep === 'password') {
+    authStep.value = 3;
+    return;
+  }
+  if (result.nextStep === 'otp') {
+    authStep.value = 2;
+    otp.value = '';
+    ElMessage.success('Kaspi запросил код из SMS');
+    return;
+  }
+  if (result.nextStep === 'connected' || result.step === 'finished') {
+    await loadSession();
+    authStep.value = 0;
+    otp.value = '';
+    kaspiPassword.value = '';
+    ElMessage.success('Kaspi подключён');
+    await refreshAll();
+    return;
+  }
+  throw new Error('Kaspi вернул неизвестный шаг входа');
+}
+async function submitKaspiPassword() {
+  if (busy.value || !kaspiPassword.value.trim()) return;
+  busy.value = true;
+  try {
+    const result = await post('/api/auth/verify-password', {
+      processId: processId.value,
+      password: kaspiPassword.value,
+    });
+    await advanceKaspiLogin(result);
+  } catch (error) {
+    report(error);
+  } finally {
+    kaspiPassword.value = '';
     busy.value = false;
   }
 }
@@ -537,12 +579,7 @@ async function verifyOTP() {
   busy.value = true;
   try {
     const result = await post('/api/auth/verify-otp', { processId: processId.value, otp: otp.value });
-    if (!result.success) throw new Error('Код не принят Kaspi');
-    await loadSession();
-    authStep.value = 0;
-    otp.value = '';
-    ElMessage.success('Kaspi подключён');
-    await refreshAll();
+    await advanceKaspiLogin(result);
   } catch (error) {
     report(error);
   } finally {
@@ -1201,7 +1238,7 @@ onUnmounted(() => {
                   </div>
                   <p v-if="checkResult" class="field-help">{{ checkResult }}</p></template
                 ><template v-else
-                  ><p class="panel-intro">Войдите через SMS, отправленное Kaspi на ваш номер.</p>
+                  ><p class="panel-intro">Укажите телефон. Kaspi запросит пароль аккаунта или код из SMS.</p>
                   <div v-if="authStep === 0" class="auth-step">
                     <span class="step-circle">01</span>
                     <h3>Начните подключение</h3>
@@ -1226,7 +1263,32 @@ onUnmounted(() => {
                       :loading="busy"
                       :disabled="!isValidPhone(phone)"
                       @click="sendPhone"
-                      >Отправить SMS</el-button
+                      >Продолжить</el-button
+                    >
+                  </div>
+                  <div v-else-if="authStep === 3" class="form-fields">
+                    <p class="field-help">Kaspi запросил пароль аккаунта {{ formatPhone(phone) }}.</p>
+                    <label class="field-label" for="kaspi-password">Пароль Kaspi Pay</label>
+                    <el-input
+                      id="kaspi-password"
+                      v-model="kaspiPassword"
+                      type="password"
+                      show-password
+                      autocomplete="off"
+                      size="large"
+                      maxlength="256"
+                      placeholder="Введите пароль аккаунта Kaspi Pay"
+                      @keyup.enter="submitKaspiPassword"
+                    />
+                    <span class="field-help">Нужен пароль аккаунта Kaspi Pay. Он не сохраняется в сервисе.</span>
+                    <el-button
+                      type="primary"
+                      size="large"
+                      class="wide submit"
+                      :loading="busy"
+                      :disabled="!kaspiPassword.trim()"
+                      @click="submitKaspiPassword"
+                      >Продолжить</el-button
                     >
                   </div>
                   <div v-else class="form-fields">
@@ -1239,8 +1301,9 @@ onUnmounted(() => {
                       @click="verifyOTP"
                       >Подтвердить вход</el-button
                     >
-                  </div></template
-                >
+                  </div>
+                  <el-button v-if="authStep > 0" text :disabled="busy" @click="beginAuth">Начать заново</el-button>
+                </template>
               </section>
               <section class="panel result-panel">
                 <div class="empty-art"><ShieldCheck :size="46" /></div>

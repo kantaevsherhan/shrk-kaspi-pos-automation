@@ -70,7 +70,7 @@ func (a *App) initLogin(ctx context.Context) (map[string]any, error) {
 	processID := stringValue(field(result, "meta", "pId"))
 	if processID != "" {
 		a.mu.Lock()
-		a.flows[processID] = &authFlow{ProcessID: processID, UserToken: getUserToken(resp), Created: time.Now()}
+		a.flows[processID] = &authFlow{ProcessID: processID, UserToken: getUserToken(resp), Created: time.Now(), Step: stringValue(field(result, "meta", "sn")), View: stringValue(field(result, "view", "code"))}
 		a.mu.Unlock()
 	}
 	return map[string]any{"success": processID != "", "processId": processID, "view": field(result, "view", "code"), "body": result}, nil
@@ -87,6 +87,9 @@ func (a *App) getFlow(id string) (*authFlow, error) {
 func (a *App) authStep(ctx context.Context, flow *authFlow, data map[string]any, sn string) (map[string]any, error) {
 	c := a.Cfg
 	referer := c.EntranceURL + "/process/universal-enter-phone-number?pId=" + flow.ProcessID + "&firstPage=KPUniversalEnterPhoneNumber"
+	if flow.View == "KPEnterLoginPassword" {
+		referer = c.EntranceURL + "/process/enter-login-password?pId=" + flow.ProcessID + "&firstPage=KPUniversalEnterPhoneNumber"
+	}
 	payload := map[string]any{"meta": map[string]any{"pId": flow.ProcessID, "sn": sn}, "data": data, "actType": "Success"}
 	body, _ := json.Marshal(payload)
 	result, resp, err := a.kaspiRequest(ctx, "POST", c.EntranceURL+"/api/v1/entrance/step", c.entranceHeaders(referer, flow.UserToken), body)
@@ -95,6 +98,18 @@ func (a *App) authStep(ctx context.Context, flow *authFlow, data map[string]any,
 	}
 	if token := getUserToken(resp); token != "" {
 		flow.UserToken = token
+	}
+	if step := stringValue(field(result, "meta", "sn")); step != "" {
+		flow.Step = step
+	}
+	if processID := stringValue(field(result, "meta", "pId")); processID != "" {
+		flow.ProcessID = processID
+	}
+	if view := stringValue(field(result, "view", "code")); view != "" {
+		flow.View = view
+	}
+	if main := stringValue(field(result, "view", "main")); main != "" {
+		flow.View = main
 	}
 	return result, nil
 }
@@ -117,7 +132,10 @@ func (a *App) sendPhone(ctx context.Context, id, phone string) (map[string]any, 
 	if err != nil {
 		return nil, err
 	}
-	sent := stringValue(field(result, "view", "code")) == "EnterOtp" || stringValue(field(result, "meta", "sn")) == "ViewEnterOtp"
+	return a.authProgress(ctx, id, flow, result)
+}
+
+func (a *App) authProgress(ctx context.Context, id string, flow *authFlow, result map[string]any) (map[string]any, error) {
 	reason := obj(field(result, "view", "onOpenAlarm", "error"))
 	if len(reason) == 0 {
 		reason = obj(result["error"])
@@ -135,7 +153,66 @@ func (a *App) sendPhone(ctx context.Context, id, phone string) (map[string]any, 
 	if message == "" {
 		message = stringValue(field(result, "data", "desc"))
 	}
-	return map[string]any{"success": sent, "processId": id, "desc": field(result, "data", "desc"), "view": field(result, "view", "code"), "errorCode": reason["code"], "errorMessage": message, "body": result}, nil
+	response := map[string]any{"success": false, "processId": id, "desc": stringValue(field(result, "data", "desc")), "view": field(result, "view", "code"), "errorCode": stringValue(reason["code"]), "errorMessage": message, "smsSent": false}
+	registration := stringValue(field(result, "data", "type")) == "kpDeviceRegistration" || stringValue(field(result, "view", "code")) == "KPMobileCall"
+	if len(reason) > 0 || result["actType"] == "Alarm" || (result["isClosed"] == true && !registration) {
+		if message == "" {
+			response["errorMessage"] = "Kaspi отклонил шаг входа. Попробуйте начать подключение заново."
+		}
+		return response, nil
+	}
+	view := stringValue(field(result, "view", "code"))
+	step := stringValue(field(result, "meta", "sn"))
+	if registration {
+		connected, err := a.finishLogin(ctx, flow)
+		if err != nil {
+			return nil, err
+		}
+		flow.Finished = true
+		a.mu.Lock()
+		delete(a.flows, id)
+		a.mu.Unlock()
+		return map[string]any{"success": true, "processId": id, "step": "finished", "nextStep": "connected", "profileId": connected.ProfileID, "organizationId": connected.OrganizationID, "orgName": connected.OrgName, "phone": connected.Phone}, nil
+	}
+	main := field(result, "view", "main")
+	if view == "EnterOtp" || step == "ViewEnterOtp" || (main != nil && main != false && main != "") {
+		response["success"], response["nextStep"], response["smsSent"] = true, "otp", true
+		return response, nil
+	}
+	if view == "KPEnterLoginPassword" || step == "ViewEnterLoginPassword" {
+		response["success"], response["nextStep"] = true, "password"
+		return response, nil
+	}
+	response["nextStep"] = "unsupported"
+	if message == "" {
+		response["errorMessage"] = "Kaspi запросил другой шаг входа: " + view
+	}
+	return response, nil
+}
+
+func (a *App) verifyKaspiPassword(ctx context.Context, id, password string) (map[string]any, error) {
+	flow, err := a.getFlow(id)
+	if err != nil {
+		return nil, err
+	}
+	flow.mu.Lock()
+	defer flow.mu.Unlock()
+	passwordRequested := flow.Step == "ViewEnterLoginPassword" || (flow.Step == "" && flow.View == "KPEnterLoginPassword")
+	if flow.Finished || !passwordRequested {
+		return nil, fmt.Errorf("%w: Kaspi has not requested a password", errLoginFlow)
+	}
+	result, err := a.authStep(ctx, flow, map[string]any{"password": password}, "ViewEnterLoginPassword")
+	if err != nil {
+		return nil, err
+	}
+	response, err := a.authProgress(ctx, id, flow, result)
+	// Provider responses must never echo the submitted password to a caller.
+	for key, value := range response {
+		if text, ok := value.(string); ok && password != "" {
+			response[key] = strings.ReplaceAll(text, password, "[скрыто]")
+		}
+	}
+	return response, err
 }
 func (a *App) verifyOTP(ctx context.Context, id, otp string) (map[string]any, error) {
 	flow, err := a.getFlow(id)
@@ -151,18 +228,7 @@ func (a *App) verifyOTP(ctx context.Context, id, otp string) (map[string]any, er
 	if err != nil {
 		return nil, err
 	}
-	if stringValue(field(result, "data", "type")) != "kpDeviceRegistration" && stringValue(field(result, "view", "code")) != "KPMobileCall" {
-		return map[string]any{"success": false, "processId": id, "step": "otp_response", "body": result}, nil
-	}
-	connected, err := a.finishLogin(ctx, flow)
-	if err != nil {
-		return nil, err
-	}
-	flow.Finished = true
-	a.mu.Lock()
-	delete(a.flows, id)
-	a.mu.Unlock()
-	return map[string]any{"success": true, "processId": id, "step": "finished", "message": "OTP verified and finish completed", "profileId": connected.ProfileID, "organizationId": connected.OrganizationID, "orgName": connected.OrgName, "phone": connected.Phone}, nil
+	return a.authProgress(ctx, id, flow, result)
 }
 func (a *App) finishLogin(ctx context.Context, flow *authFlow) (*KaspiSession, error) {
 	c := a.Cfg
