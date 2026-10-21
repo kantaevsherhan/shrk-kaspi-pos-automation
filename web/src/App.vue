@@ -2,6 +2,8 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import QRCode from 'qrcode';
 import { ElMessage, ElMessageBox } from 'element-plus';
+import PhoneInput from './components/PhoneInput.vue';
+import { formatPhone, isValidPhone, normalizePhone } from './lib/phone';
 import {
   LayoutDashboard,
   FileText,
@@ -43,6 +45,7 @@ const mobileMenu = ref(false);
 const processId = ref('');
 const authStep = ref(0);
 const phone = ref('');
+const phoneTouched = ref(false);
 const otp = ref('');
 const invoice = ref({ phoneNumber: '', amount: null, comment: '' });
 const qrAmount = ref(null);
@@ -189,14 +192,6 @@ async function api(path, options = {}) {
   return data;
 }
 const post = (path, data = {}) => api(path, { method: 'POST', body: JSON.stringify(data) });
-function normalizePhone(value) {
-  let result = value
-    .trim()
-    .replace(/[ ()-]/g, '')
-    .replace(/^\+/, '');
-  if (/^8\d{10}$/.test(result)) result = `7${result.slice(1)}`;
-  return result;
-}
 function kaspiData(data) {
   if (typeof data.StatusCode !== 'number' || data.StatusCode !== 0)
     throw new Error(data.Message || data.StatusDesc || `Kaspi: ${data.StatusCode}`);
@@ -318,12 +313,12 @@ function changePage(id) {
   if (id === 'settings') loadMonitor().catch(report);
 }
 async function createInvoice() {
-  if (!/^\d{10,11}$/.test(normalizePhone(invoice.value.phoneNumber)) || Number(invoice.value.amount) <= 0) {
+  if (!isValidPhone(invoice.value.phoneNumber) || Number(invoice.value.amount) <= 0) {
     ElMessage.warning('Введите телефон и сумму');
     return;
   }
   busy.value = true;
-  const submitted = { ...invoice.value };
+  const submitted = { ...invoice.value, phoneNumber: normalizePhone(invoice.value.phoneNumber) };
   try {
     const result = await post('/api/invoice/create', submitted);
     createdInvoice.value = kaspiData(result);
@@ -339,14 +334,14 @@ async function createInvoice() {
   }
 }
 async function lookupClient() {
-  if (!/^\d{10,11}$/.test(normalizePhone(invoice.value.phoneNumber))) {
+  if (!isValidPhone(invoice.value.phoneNumber)) {
     ElMessage.warning('Введите телефон клиента');
     return;
   }
   busy.value = true;
   try {
     clientInfo.value = kaspiData(
-      await api(`/api/invoice/client-info?phoneNumber=${encodeURIComponent(invoice.value.phoneNumber)}`),
+      await api(`/api/invoice/client-info?phoneNumber=${normalizePhone(invoice.value.phoneNumber)}`),
     );
   } catch (error) {
     report(error);
@@ -509,6 +504,7 @@ async function beginAuth() {
     const result = await post('/api/auth/init');
     if (!result.success) throw new Error('Kaspi не начал вход');
     processId.value = result.processId;
+    phoneTouched.value = false;
     authStep.value = 1;
   } catch (error) {
     report(error);
@@ -517,9 +513,17 @@ async function beginAuth() {
   }
 }
 async function sendPhone() {
+  phoneTouched.value = true;
+  if (!isValidPhone(phone.value)) {
+    ElMessage.warning('Введите 10 цифр номера после +7');
+    return;
+  }
   busy.value = true;
   try {
-    const result = await post('/api/auth/send-phone', { processId: processId.value, phoneNumber: phone.value });
+    const result = await post('/api/auth/send-phone', {
+      processId: processId.value,
+      phoneNumber: normalizePhone(phone.value),
+    });
     if (!result.success) throw new Error(result.errorMessage || result.desc || 'Kaspi не отправил SMS');
     authStep.value = 2;
     ElMessage.success('Код отправлен');
@@ -794,7 +798,7 @@ onUnmounted(() => {
                   <span>K<span>.</span></span>
                 </div>
                 <h2>{{ account.orgName || 'Kaspi Pay' }}</h2>
-                <p>{{ account.phone || 'Аккаунт подключён' }}</p>
+                <p>{{ account.phone ? formatPhone(account.phone) : 'Аккаунт подключён' }}</p>
                 <el-tag type="success" effect="light" round>● Активно</el-tag
                 ><button class="text-link" @click="changePage('settings')">
                   Настройки подключения <ArrowUpRight :size="16" />
@@ -845,12 +849,11 @@ onUnmounted(() => {
                   <span class="form-ornament"><FileText :size="22" /></span>
                 </div>
                 <div class="form-fields">
-                  <label class="field-label">Номер телефона клиента</label
-                  ><el-input
+                  <label class="field-label" for="invoice-phone">Номер телефона клиента</label
+                  ><PhoneInput
+                    id="invoice-phone"
                     v-model="invoice.phoneNumber"
                     size="large"
-                    placeholder="7XXXXXXXXXX"
-                    maxlength="32"
                     @input="clientInfo = null"
                   /><span class="field-help">Можно вставить +7 (XXX) XXX-XX-XX или 8XXXXXXXXXX</span>
                   <el-button text :loading="busy" @click="lookupClient">Проверить клиента</el-button>
@@ -930,7 +933,7 @@ onUnmounted(() => {
                   ><template #default="{ row }">#{{ row.QrOperationId || row.Id || '—' }}</template></el-table-column
                 ><el-table-column label="Клиент" min-width="130"
                   ><template #default="{ row }">{{
-                    row.ClientMobile || row.PhoneNumber || '—'
+                    formatPhone(row.ClientMobile || row.PhoneNumber)
                   }}</template></el-table-column
                 ><el-table-column label="Сумма" min-width="130"
                   ><template #default="{ row }">{{ money(row.Amount) }}</template></el-table-column
@@ -1034,7 +1037,7 @@ onUnmounted(() => {
                   ></el-table-column
                 ><el-table-column label="Клиент" min-width="140"
                   ><template #default="{ row }">{{
-                    row.ClientMobile || row.ClientName || row.PhoneNumber || '—'
+                    row.ClientMobile ? formatPhone(row.ClientMobile) : row.ClientName || formatPhone(row.PhoneNumber)
                   }}</template></el-table-column
                 ><el-table-column label="Сумма" min-width="140"
                   ><template #default="{ row }"
@@ -1079,7 +1082,9 @@ onUnmounted(() => {
               </div>
               <div class="detail-line">
                 <span>Клиент</span
-                ><b>{{ selectedDetail?.ClientName || selectedRow.ClientName || selectedRow.ClientMobile || '—' }}</b>
+                ><b>{{
+                  selectedDetail?.ClientName || selectedRow.ClientName || formatPhone(selectedRow.ClientMobile)
+                }}</b>
               </div>
               <div class="detail-line">
                 <span>Тип</span><b>{{ selectedRow.kind }}</b>
@@ -1179,7 +1184,7 @@ onUnmounted(() => {
                     <div class="summary-icon"><CheckCircle2 :size="27" /></div>
                     <div>
                       <strong>{{ account.orgName || 'Kaspi Pay' }}</strong
-                      ><span>{{ account.phone || 'Аккаунт подключён' }}</span>
+                      ><span>{{ account.phone ? formatPhone(account.phone) : 'Аккаунт подключён' }}</span>
                     </div>
                     <el-tag type="success" round>Активен</el-tag>
                   </div>
@@ -1187,7 +1192,7 @@ onUnmounted(() => {
                     <span>Организация</span><b>{{ account.orgName || '—' }}</b>
                   </div>
                   <div class="detail-line">
-                    <span>Телефон</span><b>{{ account.phone || '—' }}</b>
+                    <span>Телефон</span><b>{{ formatPhone(account.phone) }}</b>
                   </div>
                   <div class="settings-actions">
                     <el-button :loading="busy" @click="checkSession"
@@ -1206,12 +1211,20 @@ onUnmounted(() => {
                     /></el-button>
                   </div>
                   <div v-else-if="authStep === 1" class="form-fields">
-                    <label class="field-label">Телефон Kaspi Pay</label
-                    ><el-input v-model="phone" size="large" placeholder="+7 (XXX) XXX-XX-XX" maxlength="32" /><el-button
+                    <label class="field-label" for="kaspi-phone">Телефон Kaspi Pay</label
+                    ><PhoneInput id="kaspi-phone" v-model="phone" size="large" @blur="phoneTouched = true" />
+                    <span class="field-help"
+                      >Введите 10 цифр после +7. Можно вставить номер целиком через +7 или 8.</span
+                    >
+                    <span v-if="phoneTouched && !isValidPhone(phone)" class="field-help" role="alert"
+                      >Номер заполнен не полностью: нужно 10 цифр после +7.</span
+                    >
+                    <el-button
                       type="primary"
                       size="large"
                       class="wide submit"
                       :loading="busy"
+                      :disabled="!isValidPhone(phone)"
                       @click="sendPhone"
                       >Отправить SMS</el-button
                     >

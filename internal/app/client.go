@@ -129,6 +129,19 @@ func clientPhone(raw string) bool {
 	}
 	return true
 }
+
+// The entrance form sends a national ten-digit number. Remote invoices use
+// the full number, so this conversion must only be applied to SMS login.
+func smsPhone(raw string) string {
+	phone := normalizePhone(raw)
+	if len(phone) == 11 && phone[0] == '7' {
+		phone = phone[1:]
+	}
+	if len(phone) != 10 || !safeID(phone) {
+		return ""
+	}
+	return phone
+}
 func safeID(raw string) bool {
 	if raw == "" {
 		return false

@@ -92,7 +92,7 @@ func TestFormattedSMSPhone(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
 		json.NewDecoder(r.Body).Decode(&body)
-		if field(body, "data", "phoneNumber") != "77001234567" {
+		if field(body, "data", "phoneNumber") != "7001234567" {
 			t.Error("SMS request did not normalize the phone")
 		}
 		io.WriteString(w, `{"view":{"code":"EnterOtp"}}`)

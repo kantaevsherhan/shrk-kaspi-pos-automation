@@ -230,7 +230,7 @@ func (a *App) Handler() http.Handler {
 			ProcessID string `json:"processId"`
 			Phone     string `json:"phoneNumber"`
 		}
-		if decode(r, &x) != nil || x.ProcessID == "" || !clientPhone(x.Phone) {
+		if decode(r, &x) != nil || x.ProcessID == "" || smsPhone(x.Phone) == "" {
 			fail(w, 400, "valid processId and phoneNumber required")
 			return
 		}

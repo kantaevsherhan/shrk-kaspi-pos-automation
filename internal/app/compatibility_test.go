@@ -137,7 +137,7 @@ func TestOriginalSMSLoginAndEncryptedRestart(t *testing.T) {
 				http.SetCookie(w, &http.Cookie{Name: "user_token", Value: "first-cookie"})
 				io.WriteString(w, `{"meta":{"pId":"process-1"},"view":{"code":"EnterPhoneNumber"}}`)
 			case 2:
-				if field(input, "meta", "sn") != "EnterPhoneNumber" || field(input, "data", "phoneNumber") != "77001234567" || !strings.Contains(r.Header.Get("Cookie"), "user_token=first-cookie") {
+				if field(input, "meta", "sn") != "EnterPhoneNumber" || field(input, "data", "phoneNumber") != "7001234567" || !strings.Contains(r.Header.Get("Cookie"), "user_token=first-cookie") {
 					t.Error("phone step differs from Node")
 				}
 				http.SetCookie(w, &http.Cookie{Name: "user_token", Value: "second-cookie"})

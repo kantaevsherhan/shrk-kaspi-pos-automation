@@ -99,7 +99,10 @@ func (a *App) authStep(ctx context.Context, flow *authFlow, data map[string]any,
 	return result, nil
 }
 func (a *App) sendPhone(ctx context.Context, id, phone string) (map[string]any, error) {
-	phone = normalizePhone(phone)
+	phone = smsPhone(phone)
+	if phone == "" {
+		return nil, errors.New("valid phoneNumber required: 10 digits or a full +7/8 number")
+	}
 	flow, err := a.getFlow(id)
 	if err != nil {
 		return nil, err
@@ -109,12 +112,12 @@ func (a *App) sendPhone(ctx context.Context, id, phone string) (map[string]any, 
 	if flow.Finished {
 		return nil, errLoginFlow
 	}
-	flow.Phone = phone
+	flow.Phone = "7" + phone
 	result, err := a.authStep(ctx, flow, map[string]any{"phoneNumber": phone}, "EnterPhoneNumber")
 	if err != nil {
 		return nil, err
 	}
-	sent := stringValue(field(result, "view", "code")) == "EnterOtp"
+	sent := stringValue(field(result, "view", "code")) == "EnterOtp" || stringValue(field(result, "meta", "sn")) == "ViewEnterOtp"
 	reason := obj(field(result, "view", "onOpenAlarm", "error"))
 	if len(reason) == 0 {
 		reason = obj(result["error"])

@@ -41,6 +41,18 @@ func TestBrowserSmokeServer(t *testing.T) {
 		defer mu.Unlock()
 		var data any = map[string]any{}
 		switch r.URL.Path {
+		case "/api/v1/entrance/step":
+			var input map[string]any
+			json.NewDecoder(r.Body).Decode(&input)
+			view, step := "KPUniversalEnterPhoneNumber", "EnterPhoneNumber"
+			if field(input, "meta", "sn") == "EnterPhoneNumber" {
+				view, step = "EnterOtp", "ViewEnterOtp"
+				if field(input, "data", "phoneNumber") != "7001234567" {
+					t.Error("masked phone was not sent in national format")
+				}
+			}
+			json.NewEncoder(w).Encode(map[string]any{"meta": map[string]any{"pId": "smoke-process", "sn": step}, "view": map[string]any{"code": view}})
+			return
 		case "/v01/remote/client-info":
 			data = map[string]any{"ClientName": "Тестовый клиент", "ClientStatus": "Active"}
 		case "/v01/remote/create", "/v02/remote/details":
@@ -76,6 +88,7 @@ func TestBrowserSmokeServer(t *testing.T) {
 	}))
 	defer mock.Close()
 	a.Cfg.QRPayURL = mock.URL
+	a.Cfg.EntranceURL = mock.URL
 	server := &http.Server{Addr: "127.0.0.1:38473", Handler: a.Handler(), ReadHeaderTimeout: 5 * time.Second}
 	t.Cleanup(func() { server.Close() })
 	t.Log("isolated browser fixture: http://127.0.0.1:38473")
