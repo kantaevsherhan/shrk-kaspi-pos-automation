@@ -90,3 +90,35 @@ func TestInvoiceIntervalConfiguration(t *testing.T) {
 		})
 	}
 }
+
+// The upstream auth compatibility update must reach every entrance header.
+func TestCurrentKaspiClientProfile(t *testing.T) {
+	for _, override := range []bool{false, true} {
+		t.Run(map[bool]string{false: "defaults", true: "environment override"}[override], func(t *testing.T) {
+			t.Setenv("TOKEN_SECRET_KEY", strings.Repeat("11", 32))
+			t.Setenv("SERVICE_API_KEYS", `{"service":"abcdefghijklmnopqrstuvwxyz1234567890"}`)
+			t.Setenv("STATE_DIR", t.TempDir())
+			t.Setenv("TELEGRAM_BOT_TOKEN", "")
+			t.Setenv("TELEGRAM_CHAT_ID", "")
+			t.Setenv("APP_VERSION", "")
+			t.Setenv("APP_BUILD", "")
+			version, build := "26.1029", "1128"
+			if override {
+				version, build = "27.0101", "1200"
+				t.Setenv("APP_VERSION", version)
+				t.Setenv("APP_BUILD", build)
+			}
+			cfg, err := LoadConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.App.Version != version || cfg.App.Build != build {
+				t.Fatal("incorrect client profile")
+			}
+			cookie := cfg.entranceCookie("")
+			if !strings.Contains(cookie, "ma_ver="+version+";") || !strings.Contains(cookie, "ma_bld="+build+";") {
+				t.Fatal("client profile missing from entrance cookie")
+			}
+		})
+	}
+}

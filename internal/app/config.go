@@ -100,7 +100,7 @@ func LoadConfig() (*Config, error) {
 	}
 	c := &Config{Host: env("HOST", "127.0.0.1"), Port: env("PORT", "3000"), StateDir: state, FrontendDir: env("FRONTEND_DIR", "web/dist"), TokenKey: key, ServiceKeys: keys,
 		EntranceURL: env("KASPI_ENTRANCE_URL", "https://entrance-pay.kaspi.kz"), MTokenURL: env("KASPI_MTOKEN_URL", "https://mtoken.kaspi.kz"), QRPayURL: env("KASPI_QRPAY_URL", "https://qrpay.kaspi.kz"),
-		App: AppInfo{Version: env("APP_VERSION", "26.0921"), Build: env("APP_BUILD", "1115"), Platform: env("APP_PLATFORM", "iOS"), PlatformVer: env("APP_PLATFORM_VER", "18.4"), Locale: env("APP_LOCALE", "ru-RU"), Model: env("APP_MODEL", "iPhone16,2"), Brand: env("APP_BRAND", "Apple"), DeviceName: env("APP_DEVICE_NAME", "iPhone"), ScreenW: env("APP_SCREEN_W", "430.0"), ScreenH: env("APP_SCREEN_H", "932.0"), CFNetwork: env("APP_CFNETWORK", "CFNetwork/3826.400.120"), Darwin: env("APP_DARWIN", "Darwin/24.4.0")}}
+		App: AppInfo{Version: env("APP_VERSION", "26.1029"), Build: env("APP_BUILD", "1128"), Platform: env("APP_PLATFORM", "iOS"), PlatformVer: env("APP_PLATFORM_VER", "18.4"), Locale: env("APP_LOCALE", "ru-RU"), Model: env("APP_MODEL", "iPhone16,2"), Brand: env("APP_BRAND", "Apple"), DeviceName: env("APP_DEVICE_NAME", "iPhone"), ScreenW: env("APP_SCREEN_W", "430.0"), ScreenH: env("APP_SCREEN_H", "932.0"), CFNetwork: env("APP_CFNETWORK", "CFNetwork/3826.400.120"), Darwin: env("APP_DARWIN", "Darwin/24.4.0")}}
 	c.SecureCookies = env("COOKIE_SECURE", "false") == "true"
 	c.TelegramBotToken = os.Getenv("TELEGRAM_BOT_TOKEN")
 	c.TelegramChatID = os.Getenv("TELEGRAM_CHAT_ID")
