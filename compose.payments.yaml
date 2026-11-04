@@ -1,0 +1,9 @@
+services:
+  kaspi-pos:
+    networks:
+      - default
+      - payments
+networks:
+  payments:
+    external: true
+    name: jumyskop-payments
