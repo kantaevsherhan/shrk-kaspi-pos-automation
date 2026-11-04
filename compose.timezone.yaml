@@ -1,0 +1,7 @@
+services:
+  kaspi-pos:
+    volumes:
+      - /usr/share/zoneinfo/Asia/Almaty:/etc/localtime:ro
+  lan-gateway:
+    volumes:
+      - /usr/share/zoneinfo/Asia/Almaty:/etc/localtime:ro
